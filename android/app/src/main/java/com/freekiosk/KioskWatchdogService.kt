@@ -4,6 +4,8 @@ import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -37,13 +39,15 @@ class KioskWatchdogService : Service() {
         private const val TAG = "KioskWatchdog"
         private const val CHANNEL_ID = "freekiosk_watchdog"
         private const val NOTIFICATION_ID = 2002
-        private const val CHECK_INTERVAL_MS = 10_000L  // check every 10 s
+        private const val CHECK_INTERVAL_MS = 1_000L  // fast enough to hide escaped Settings screens
         private const val RELAUNCH_COOLDOWN_MS = 15_000L // min 15 s between relaunches
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var isRunning = false
     private var lastRelaunchTime = 0L
+    private var lastUsageQueryTime = System.currentTimeMillis() - 60_000L
+    private var observedForegroundPackage: String? = null
 
     private val checkRunnable = object : Runnable {
         override fun run() {
@@ -104,6 +108,25 @@ class KioskWatchdogService : Service() {
             return
         }
 
+        // Strict visible-app guard. Lock task remains the primary restriction; Usage
+        // Access lets us correct vendor/system activities that appear above it anyway.
+        if (KioskForegroundGuard.isProtectionActive(this)) {
+            val foregroundPackage = getForegroundPackageFromUsageEvents()
+            if (foregroundPackage != null) {
+                if (KioskForegroundGuard.isAllowedForeground(this, foregroundPackage)) {
+                    KioskForegroundGuard.noteAllowedForeground(this, foregroundPackage)
+                    return
+                }
+
+                DebugLog.d(TAG, "Unauthorized foreground package: $foregroundPackage")
+                KioskForegroundGuard.recoverAllowedForeground(
+                    this,
+                    "usage-stats:$foregroundPackage"
+                )
+                return
+            }
+        }
+
         // In external app mode, the external app is expected to be in the foreground.
         // Don't relaunch MainActivity just because it's not the topActivity — check
         // that either FreeKiosk OR the external app is running. (#106)
@@ -134,6 +157,38 @@ class KioskWatchdogService : Service() {
             startActivity(intent)
         } catch (e: Exception) {
             DebugLog.errorProduction(TAG, "Failed to relaunch: ${e.message}")
+        }
+    }
+
+    /**
+     * Resolve the currently resumed activity using UsageEvents. Returns null when the
+     * special Usage Access permission has not been granted, preserving the old watchdog
+     * fallback behavior on those devices.
+     */
+    private fun getForegroundPackageFromUsageEvents(): String? {
+        return try {
+            val usageStatsManager =
+                getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val events = usageStatsManager.queryEvents(lastUsageQueryTime, now)
+            val event = UsageEvents.Event()
+
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                val resumed = event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                        event.eventType == UsageEvents.Event.ACTIVITY_RESUMED)
+                if (resumed && !event.packageName.isNullOrBlank()) {
+                    observedForegroundPackage = event.packageName
+                }
+            }
+
+            // Small overlap avoids losing an event on millisecond boundaries.
+            lastUsageQueryTime = now - 250L
+            observedForegroundPackage
+        } catch (e: Exception) {
+            DebugLog.d(TAG, "Usage foreground query unavailable: ${e.message}")
+            null
         }
     }
 

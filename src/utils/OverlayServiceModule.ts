@@ -8,7 +8,9 @@ interface OverlayServiceModuleType {
     buttonPosition: string,
     lockedPackage?: string | null,
     autoRelaunch?: boolean,
-    nfcEnabled?: boolean
+    nfcEnabled?: boolean,
+    kioskHomeButtonEnabled?: boolean,
+    kioskHomeButtonPosition?: string
   ): Promise<boolean>;
   // #190 — Configure the native inactivity countdown for External App screensaver activation
   updateInactivityConfig(delayMs: number, enabled: boolean): Promise<boolean>;

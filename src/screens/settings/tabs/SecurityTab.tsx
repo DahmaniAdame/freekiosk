@@ -51,6 +51,10 @@ interface SecurityTabProps {
   onReturnTapTimeoutChange: (value: string) => void;
   returnButtonPosition: string; // 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
   onReturnButtonPositionChange: (value: string) => void;
+  kioskHomeButtonEnabled: boolean;
+  onKioskHomeButtonEnabledChange: (value: boolean) => void;
+  kioskHomeButtonPosition: string;
+  onKioskHomeButtonPositionChange: (value: string) => void;
   overlayButtonVisible: boolean;
   onOverlayButtonVisibleChange: (value: boolean) => void;
   volumeUp5TapEnabled: boolean;
@@ -129,6 +133,10 @@ const SecurityTab: React.FC<SecurityTabProps> = ({
   onReturnTapTimeoutChange,
   returnButtonPosition,
   onReturnButtonPositionChange,
+  kioskHomeButtonEnabled,
+  onKioskHomeButtonEnabledChange,
+  kioskHomeButtonPosition,
+  onKioskHomeButtonPositionChange,
   overlayButtonVisible,
   onOverlayButtonVisibleChange,
   volumeUp5TapEnabled,
@@ -551,6 +559,36 @@ const SecurityTab: React.FC<SecurityTabProps> = ({
               value={autoRelaunchApp}
               onValueChange={onAutoRelaunchAppChange}
             />
+          </SettingsSection>
+
+          <SettingsSection title="Close App Button" icon="close-circle-outline">
+            <SettingsSwitch
+              label="Show Close App Button"
+              hint="Show a one-tap close button above allowed apps. It closes the current app and returns to the kiosk app grid without opening Settings."
+              value={kioskHomeButtonEnabled}
+              onValueChange={onKioskHomeButtonEnabledChange}
+            />
+            {kioskHomeButtonEnabled && (
+              <>
+                <View style={styles.divider} />
+                <SettingsRadioGroup
+                  hint="Choose where the Close App button appears on screen"
+                  options={[
+                    { value: 'top-left', label: 'Top Left', icon: 'arrow-top-left' },
+                    { value: 'top-right', label: 'Top Right', icon: 'arrow-top-right' },
+                    { value: 'bottom-left', label: 'Bottom Left', icon: 'arrow-bottom-left' },
+                    { value: 'bottom-right', label: 'Bottom Right', icon: 'arrow-bottom-right' },
+                  ]}
+                  value={kioskHomeButtonPosition}
+                  onValueChange={onKioskHomeButtonPositionChange}
+                />
+                <SettingsInfoBox variant="info">
+                  <Text style={styles.infoText}>
+                    The Settings return gesture remains separate and still requires the configured number of taps and PIN.
+                  </Text>
+                </SettingsInfoBox>
+              </>
+            )}
           </SettingsSection>
           
           {/* Back Button Behavior */}

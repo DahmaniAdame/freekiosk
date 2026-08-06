@@ -5,13 +5,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.app.admin.DevicePolicyManager
 import android.app.usage.UsageStats
 import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.net.wifi.WifiManager
@@ -27,6 +31,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
@@ -40,6 +45,58 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private class CloseAppButtonView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val facePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#132733")
+        style = Paint.Style.FILL
+        setShadowLayer(6f * density, 0f, 3f * density, Color.argb(100, 0, 0, 0))
+    }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#EF6C22")
+        style = Paint.Style.STROKE
+        strokeWidth = 2f * density
+    }
+    private val closePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 3.5f * density
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    init {
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
+        isClickable = true
+        isFocusable = true
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
+        contentDescription = "Close current app and return to kiosk home"
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val centerX = width / 2f
+        val centerY = height / 2f
+        val radius = minOf(width, height) / 2f - 6f * density
+        canvas.drawCircle(centerX, centerY, radius, facePaint)
+        canvas.drawCircle(centerX, centerY, radius, borderPaint)
+
+        val arm = 8.5f * density
+        canvas.drawLine(centerX - arm, centerY - arm, centerX + arm, centerY + arm, closePaint)
+        canvas.drawLine(centerX + arm, centerY - arm, centerX - arm, centerY + arm, closePaint)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> animate().scaleX(0.92f).scaleY(0.92f).setDuration(80L).start()
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                animate().scaleX(1f).scaleY(1f).setDuration(100L).start()
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean = super.performClick()
+}
 
 class OverlayService : Service() {
 
@@ -96,10 +153,9 @@ class OverlayService : Service() {
             instance?.let { service ->
                 Handler(Looper.getMainLooper()).post {
                     try {
-                        // Destroy all overlays first
-                        service.destroyOverlay()
-                        // Then recreate
-                        service.createOverlay()
+                        // Re-pin only the protection layer. The Close App button is a
+                        // stable independent window and must never blink every cycle.
+                        service.repinOverlay()
                         DebugLog.d("OverlayService", "Return button brought to front")
                     } catch (e: Exception) {
                         DebugLog.e("OverlayService", "Failed to bring to front: ${e.message}")
@@ -108,10 +164,19 @@ class OverlayService : Service() {
             }
         }
 
+        fun updateForegroundPackage(packageName: String?) {
+            instance?.let { service ->
+                Handler(Looper.getMainLooper()).post {
+                    service.handleForegroundPackageChanged(packageName)
+                }
+            }
+        }
+
     }
 
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
+    private var kioskHomeButtonView: View? = null
     private var indicatorView: View? = null  // Visual indicator in tap_anywhere mode
     private var returnButton: View? = null  // Changed from Button to View (now a FrameLayout)
     private var statusBarView: View? = null
@@ -151,6 +216,9 @@ class OverlayService : Service() {
     private var requiredTaps = 5 // Default, will be overridden from intent
     private var returnMode = "tap_anywhere" // 'tap_anywhere' or 'button'
     private var buttonPosition = "bottom-right" // 'top-left', 'top-right', 'bottom-left', 'bottom-right'
+    private var kioskHomeButtonEnabled = true
+    private var kioskHomeButtonPosition = "bottom-left"
+    private var currentForegroundPackage: String? = null
     private val CHANNEL_ID = "FreeKioskOverlay"
     private val NOTIFICATION_ID = 1001
     private val STATUS_UPDATE_INTERVAL = 15000L // Update every 15 seconds (was 5s, reduced for low-end device performance)
@@ -179,7 +247,8 @@ class OverlayService : Service() {
                 Intent.ACTION_SCREEN_ON -> {
                     DebugLog.d("OverlayService", "Screen ON - ensuring overlay is visible")
                     // Recréer l'overlay si nécessaire
-                    if (overlayView == null) {
+                    if (overlayView == null || closeButtonMissingWhenExpected()) {
+                        destroyOverlay()
                         createOverlay()
                     }
                     // MQTT watchdog: check connection on screen wake
@@ -200,6 +269,7 @@ class OverlayService : Service() {
     private val volumeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
+                context?.let { VolumeLimitManager.enforce(it) }
                 DebugLog.d("OverlayService", "Volume changed - updating status bar")
                 updateStatusBar()
             }
@@ -328,7 +398,8 @@ class OverlayService : Service() {
         if (intent == null) {
             DebugLog.d("OverlayService", "onStartCommand with null intent (service restarted by system)")
             val hasOverlayPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
-            if (hasOverlayPermission && overlayView == null) {
+            if (hasOverlayPermission && (overlayView == null || closeButtonMissingWhenExpected())) {
+                destroyOverlay()
                 createOverlay()
             }
             if (hasOverlayPermission && statusBarEnabled && statusBarView == null) {
@@ -351,6 +422,8 @@ class OverlayService : Service() {
         // Track if overlay parameters changed — avoid unnecessary destroy/recreate
         val oldReturnMode = returnMode
         val oldButtonPosition = buttonPosition
+        val oldKioskHomeButtonEnabled = kioskHomeButtonEnabled
+        val oldKioskHomeButtonPosition = kioskHomeButtonPosition
 
         // Get required taps from intent (default 5)
         intent.getIntExtra("REQUIRED_TAPS", 5).let { taps ->
@@ -374,6 +447,11 @@ class OverlayService : Service() {
         intent.getStringExtra("BUTTON_POSITION")?.let { position ->
             buttonPosition = position
             DebugLog.d("OverlayService", "Button position set to: $buttonPosition")
+        }
+
+        kioskHomeButtonEnabled = intent.getBooleanExtra("KIOSK_HOME_BUTTON_ENABLED", kioskHomeButtonEnabled)
+        intent.getStringExtra("KIOSK_HOME_BUTTON_POSITION")?.let { position ->
+            kioskHomeButtonPosition = position
         }
         
         // Get locked package and auto-relaunch settings for monitoring
@@ -410,13 +488,17 @@ class OverlayService : Service() {
         val hasOverlayPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
         
         // Only recreate overlay if parameters changed or overlay doesn't exist
-        val overlayParamsChanged = returnMode != oldReturnMode || buttonPosition != oldButtonPosition
+        val overlayParamsChanged = returnMode != oldReturnMode ||
+            buttonPosition != oldButtonPosition ||
+            kioskHomeButtonEnabled != oldKioskHomeButtonEnabled ||
+            kioskHomeButtonPosition != oldKioskHomeButtonPosition
         if (hasOverlayPermission) {
             if (overlayView != null && overlayParamsChanged) {
                 DebugLog.d("OverlayService", "Overlay params changed, recreating")
                 destroyOverlay()
                 createOverlay()
-            } else if (overlayView == null) {
+            } else if (overlayView == null || closeButtonMissingWhenExpected()) {
+                destroyOverlay()
                 createOverlay()
             }
         }
@@ -432,13 +514,103 @@ class OverlayService : Service() {
 
 
     private fun createOverlay() {
-        DebugLog.d("OverlayService", "createOverlay() called with returnMode='$returnMode', buttonPosition='$buttonPosition'")
+        DebugLog.d("OverlayService", "createOverlay() called with returnMode='$returnMode', buttonPosition='$buttonPosition', homeButton=$kioskHomeButtonEnabled/$kioskHomeButtonPosition")
         if (returnMode == "button") {
             DebugLog.d("OverlayService", "Creating BUTTON mode overlay")
             createButtonModeOverlay()
         } else {
             DebugLog.d("OverlayService", "Creating TAP_ANYWHERE mode overlay")
             createTapAnywhereModeOverlay()
+        }
+        if (kioskHomeButtonEnabled &&
+            kioskHomeButtonView == null &&
+            !lockedPackage.isNullOrBlank() &&
+            currentForegroundPackage == lockedPackage) {
+            createKioskHomeButtonOverlay()
+        }
+    }
+
+    private fun closeButtonMissingWhenExpected(): Boolean {
+        return kioskHomeButtonEnabled &&
+            !lockedPackage.isNullOrBlank() &&
+            currentForegroundPackage == lockedPackage &&
+            kioskHomeButtonView == null
+    }
+
+    private fun handleForegroundPackageChanged(foregroundPackage: String?) {
+        currentForegroundPackage = foregroundPackage
+        when {
+            kioskHomeButtonEnabled &&
+                !lockedPackage.isNullOrBlank() &&
+                foregroundPackage == lockedPackage &&
+                kioskHomeButtonView == null -> createKioskHomeButtonOverlay()
+
+            foregroundPackage == packageName || lockedPackage == null -> removeCloseAppButton()
+        }
+    }
+
+    private fun removeCloseAppButton() {
+        kioskHomeButtonView?.let {
+            try {
+                windowManager?.removeView(it)
+            } catch (e: Exception) {
+                DebugLog.d("OverlayService", "Close App button already detached: ${e.message}")
+            }
+        }
+        kioskHomeButtonView = null
+    }
+
+    private fun createKioskHomeButtonOverlay() {
+        val density = resources.displayMetrics.density
+        val sizePx = (64 * density).toInt()
+        val marginPx = (10 * density).toInt()
+        val sameCornerOffsetPx = if (returnMode == "button" && buttonPosition == kioskHomeButtonPosition) {
+            (72 * density).toInt()
+        } else {
+            0
+        }
+
+        val button = CloseAppButtonView(this).apply {
+            setOnClickListener {
+                isEnabled = false
+                closeCurrentAppAndReturnHome()
+            }
+        }
+
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = getPositionGravity(kioskHomeButtonPosition)
+            x = marginPx
+            y = marginPx + sameCornerOffsetPx
+        }
+
+        try {
+            kioskHomeButtonView = button
+            windowManager?.addView(button, params)
+            DebugLog.d("OverlayService", "Close App button created at $kioskHomeButtonPosition")
+        } catch (e: Exception) {
+            kioskHomeButtonView = null
+            DebugLog.errorProduction("OverlayService", "Failed to create Close App button: ${e.message}")
+        }
+    }
+
+    private fun getPositionGravity(position: String): Int {
+        return when (position) {
+            "top-left" -> Gravity.TOP or Gravity.START
+            "top-right" -> Gravity.TOP or Gravity.END
+            "bottom-left" -> Gravity.BOTTOM or Gravity.START
+            "bottom-right" -> Gravity.BOTTOM or Gravity.END
+            else -> Gravity.BOTTOM or Gravity.START
         }
     }
     
@@ -510,13 +682,7 @@ class OverlayService : Service() {
     }
     
     private fun getButtonGravity(): Int {
-        return when (buttonPosition) {
-            "top-left" -> Gravity.TOP or Gravity.START
-            "top-right" -> Gravity.TOP or Gravity.END
-            "bottom-left" -> Gravity.BOTTOM or Gravity.START
-            "bottom-right" -> Gravity.BOTTOM or Gravity.END
-            else -> Gravity.BOTTOM or Gravity.END
-        }
+        return getPositionGravity(buttonPosition)
     }
     
     private fun getButtonMargins(marginPx: Int): Pair<Int, Int> {
@@ -1068,6 +1234,8 @@ class OverlayService : Service() {
     private fun returnToFreeKiosk() {
         try {
             DebugLog.d("OverlayService", "returnToFreeKiosk() called")
+
+            KioskForegroundGuard.clearActiveKioskPackage(this)
             
             // IMPORTANT: Bloquer le relaunch automatique AVANT de lancer MainActivity
             MainActivity.blockAutoRelaunch = true
@@ -1136,6 +1304,92 @@ class OverlayService : Service() {
         }
     }
 
+    private fun closeCurrentAppAndReturnHome() {
+        val targetPackage = lockedPackage?.takeIf { it != packageName }
+
+        try {
+            // Disarm every relaunch path before changing tasks; otherwise the monitor
+            // can immediately reopen the app that the user just closed.
+            autoRelaunchEnabled = false
+            lockedPackage = null
+            stopForegroundMonitoring()
+            stopOverlayRepinLoop()
+            MainActivity.blockAutoRelaunch = true
+            KioskForegroundGuard.clearActiveKioskPackage(this)
+            BlockingOverlayManager.getInstance(this).setForegroundPackage(packageName)
+
+            val params = Arguments.createMap().apply {
+                putBoolean("voluntary", true)
+                putBoolean("home", true)
+                targetPackage?.let { putString("closedPackage", it) }
+            }
+            KioskModule.sendEventFromNative("onAppReturned", params)
+
+            destroyOverlay()
+
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            for (task in activityManager.appTasks) {
+                if (task.taskInfo.baseActivity?.packageName == packageName) {
+                    task.moveToFront()
+                    break
+                }
+            }
+
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("voluntaryReturn", true)
+                putExtra("kioskHomeReturn", true)
+            }
+            startActivity(intent)
+            closeExternalAppProcess(targetPackage)
+            DebugLog.d("OverlayService", "Closed $targetPackage and returned to kiosk home")
+            stopSelf()
+        } catch (e: Exception) {
+            DebugLog.errorProduction("OverlayService", "Failed to close app and return home: ${e.message}")
+        }
+    }
+
+    private fun closeExternalAppProcess(targetPackage: String?) {
+        if (targetPackage.isNullOrBlank() || targetPackage == packageName) return
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                activityManager.killBackgroundProcesses(targetPackage)
+            } catch (e: Exception) {
+                DebugLog.d("OverlayService", "Background-process close failed for $targetPackage: ${e.message}")
+            }
+
+            // Device Owner has no public force-stop API. Temporarily hiding the app is
+            // the policy-safe equivalent: Android removes its task and stops it while
+            // preserving its data. Restore visibility immediately for the next launch.
+            try {
+                val devicePolicyManager =
+                    getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val admin = ComponentName(this, DeviceAdminReceiver::class.java)
+                val canUsePolicyClose = devicePolicyManager.isDeviceOwnerApp(packageName) &&
+                    !devicePolicyManager.isApplicationHidden(admin, targetPackage)
+
+                if (canUsePolicyClose &&
+                    devicePolicyManager.setApplicationHidden(admin, targetPackage, true)) {
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        try {
+                            devicePolicyManager.setApplicationHidden(admin, targetPackage, false)
+                            DebugLog.d("OverlayService", "Policy close completed for $targetPackage")
+                        } catch (e: Exception) {
+                            DebugLog.errorProduction(
+                                "OverlayService",
+                                "Could not restore $targetPackage after policy close: ${e.message}"
+                            )
+                        }
+                    }, 300L)
+                }
+            } catch (e: Exception) {
+                DebugLog.d("OverlayService", "Policy close unavailable for $targetPackage: ${e.message}")
+            }
+        }, 350L)
+    }
+
     private fun sendNavigateToPinEvent() {
         try {
             // Use KioskModule.sendEventFromNative() which works with New Architecture
@@ -1187,6 +1441,7 @@ class OverlayService : Service() {
         overlayRepinHandler.postDelayed(object : Runnable {
             override fun run() {
                 if (lockedPackage != null) {
+                    getForegroundPackage()?.let { handleForegroundPackageChanged(it) }
                     repinOverlay()
                     overlayRepinHandler.postDelayed(this, OVERLAY_REPIN_INTERVAL)
                 }
@@ -1439,7 +1694,7 @@ class OverlayService : Service() {
                 val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
                 if (launchIntent != null) {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    startActivity(launchIntent)
+                    KioskTaskLauncher.launch(this, launchIntent)
                     DebugLog.d("OverlayService", "External app relaunched directly: $targetPackage")
                     return
                 } else {
@@ -1566,6 +1821,16 @@ class OverlayService : Service() {
                 }
             }
             overlayView = null
+
+            kioskHomeButtonView?.let {
+                try {
+                    windowManager?.removeView(it)
+                    DebugLog.d("OverlayService", "Kiosk Home button removed")
+                } catch (e: Exception) {
+                    DebugLog.d("OverlayService", "Kiosk Home button already removed or not attached: ${e.message}")
+                }
+            }
+            kioskHomeButtonView = null
             
             // Supprimer l'indicateur visuel (mode tap_anywhere seulement)
             indicatorView?.let { 

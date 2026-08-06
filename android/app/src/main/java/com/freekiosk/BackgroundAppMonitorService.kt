@@ -65,6 +65,14 @@ class BackgroundAppMonitorService : Service() {
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
 
+        if (isKioskEnabled()) {
+            // Starting another app's launcher Activity is visible by definition. It
+            // must never be used as a keep-alive mechanism while children are in kiosk.
+            DebugLog.d(TAG, "Kiosk mode active; stopping visible keep-alive monitor")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         // Read keep-alive packages from AsyncStorage
         keepAlivePackages = readKeepAlivePackages()
         
@@ -301,6 +309,23 @@ class BackgroundAppMonitorService : Service() {
         } catch (e: Exception) {
             DebugLog.d(TAG, "Could not read managed apps: ${e.message}")
             emptyList()
+        }
+    }
+
+    private fun isKioskEnabled(): Boolean {
+        return try {
+            val dbPath = getDatabasePath("RKStorage").absolutePath
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READONLY)
+            val cursor = db.rawQuery(
+                "SELECT value FROM catalystLocalStorage WHERE key = ?",
+                arrayOf("@kiosk_enabled")
+            )
+            val enabled = cursor.moveToFirst() && cursor.getString(0) == "true"
+            cursor.close()
+            db.close()
+            enabled
+        } catch (_: Exception) {
+            false
         }
     }
 

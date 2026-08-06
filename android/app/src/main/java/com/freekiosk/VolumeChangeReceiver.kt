@@ -37,9 +37,9 @@ class VolumeChangeReceiver : BroadcastReceiver() {
         if (intent.action == "android.media.VOLUME_CHANGED_ACTION") {
             try {
                 val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                val currentVolume = VolumeLimitManager.enforce(context, audioManager)
                 val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = (currentVolume * 100) / maxVolume
+                val volumePercent = if (maxVolume > 0) (currentVolume * 100) / maxVolume else 0
                 
                 Log.d(TAG, "Volume changed to $volumePercent% (raw: $currentVolume/$maxVolume)")
                 

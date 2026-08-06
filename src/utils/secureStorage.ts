@@ -2,6 +2,7 @@ import * as Keychain from 'react-native-keychain';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeModules, Platform } from 'react-native';
 import { StorageService } from './storage';
+import { scheduleSettingsSnapshot } from './SettingsHistoryService';
 
 const { KioskModule } = NativeModules;
 
@@ -274,6 +275,7 @@ export async function saveSecurePin(pin: string): Promise<boolean> {
 
     // Reset attempts when new PIN is set
     await resetPinAttempts();
+    scheduleSettingsSnapshot('PIN configuration');
 
     return true;
   } catch (error) {
@@ -625,6 +627,7 @@ export async function clearSecurePin(): Promise<void> {
         console.warn('[SecureStorage] Failed to clear ADB PIN hash:', e);
       }
     }
+    scheduleSettingsSnapshot('PIN configuration');
   } catch (error) {
     console.error('[SecureStorage] Error clearing PIN:', error);
   }
@@ -688,6 +691,7 @@ export async function saveSecureApiKey(apiKey: string): Promise<boolean> {
     await clearLegacyApiKey();
 
     console.log('[SecureStorage] API key saved to Keychain');
+    scheduleSettingsSnapshot('@kiosk_rest_api_key');
     return true;
   } catch (error) {
     console.error('[SecureStorage] Error saving API key:', error);
@@ -734,6 +738,7 @@ export async function clearSecureApiKey(): Promise<void> {
     await Keychain.resetGenericPassword({ service: API_KEY_SERVICE });
     await clearLegacyApiKey();
     console.log('[SecureStorage] API key cleared');
+    scheduleSettingsSnapshot('@kiosk_rest_api_key');
   } catch (error) {
     console.error('[SecureStorage] Error clearing API key:', error);
   }
@@ -790,6 +795,7 @@ export async function saveSecureMqttPassword(password: string): Promise<boolean>
     );
 
     console.log('[SecureStorage] MQTT password saved to Keychain');
+    scheduleSettingsSnapshot('@kiosk_mqtt_password');
     return true;
   } catch (error) {
     console.error('[SecureStorage] Error saving MQTT password:', error);
@@ -822,6 +828,7 @@ export async function clearSecureMqttPassword(): Promise<void> {
   try {
     await Keychain.resetGenericPassword({ service: MQTT_PASSWORD_SERVICE });
     console.log('[SecureStorage] MQTT password cleared');
+    scheduleSettingsSnapshot('@kiosk_mqtt_password');
   } catch (error) {
     console.error('[SecureStorage] Error clearing MQTT password:', error);
   }
@@ -841,6 +848,7 @@ export async function saveSecureBasicAuthPassword(password: string): Promise<boo
       service: BASIC_AUTH_PASSWORD_SERVICE,
       accessible: Keychain.ACCESSIBLE.WHEN_UNLOCKED,
     });
+    scheduleSettingsSnapshot('@kiosk_http_basic_auth_password');
     return true;
   } catch (error) {
     console.error('[SecureStorage] Error saving basic auth password:', error);
@@ -861,6 +869,7 @@ export async function getSecureBasicAuthPassword(): Promise<string> {
 export async function clearSecureBasicAuthPassword(): Promise<void> {
   try {
     await Keychain.resetGenericPassword({ service: BASIC_AUTH_PASSWORD_SERVICE });
+    scheduleSettingsSnapshot('@kiosk_http_basic_auth_password');
   } catch (error) {
     console.error('[SecureStorage] Error clearing basic auth password:', error);
   }

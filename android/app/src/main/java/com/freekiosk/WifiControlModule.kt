@@ -576,6 +576,7 @@ class WifiControlModule(private val reactContext: ReactApplicationContext) :
             }
 
             val settingsPackages = resolveWifiRequestDialogPackages()
+            KioskForegroundGuard.temporarilyAllowPackages(settingsPackages)
             val updated = (currentPackages.toList() + settingsPackages).distinct()
             if (updated.size != currentPackages.size) {
                 dpm.setLockTaskPackages(admin, updated.toTypedArray())
@@ -588,6 +589,7 @@ class WifiControlModule(private val reactContext: ReactApplicationContext) :
 
     private fun restoreLockTaskPackages() {
         val original = wifiRequestOriginalLockTaskPackages ?: return
+        val temporaryPackages = resolveWifiRequestDialogPackages()
         try {
             val dpm = reactContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val admin = ComponentName(reactContext, DeviceAdminReceiver::class.java)
@@ -598,6 +600,7 @@ class WifiControlModule(private val reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             android.util.Log.w("WifiControlModule", "Could not restore lock task packages after WiFi request: ${e.message}")
         } finally {
+            KioskForegroundGuard.revokeTemporaryPackages(temporaryPackages)
             wifiRequestOriginalLockTaskPackages = null
         }
     }

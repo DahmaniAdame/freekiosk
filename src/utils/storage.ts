@@ -1,10 +1,33 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import BaseAsyncStorage from '@react-native-async-storage/async-storage';
 import { BlockingRegion } from '../types/blockingOverlay';
 import { ScreenScheduleRule } from '../types/screenScheduler';
 import { DashboardTile } from '../types/dashboard';
 import { ManagedApp } from '../types/managedApps';
 import { MediaItem, MediaFitMode } from '../types/mediaPlayer';
 import { saveSecureApiKey, getSecureApiKey, clearSecureApiKey, clearSecureMqttPassword } from './secureStorage';
+import { scheduleSettingsSnapshot } from './SettingsHistoryService';
+
+// All configuration writes in this service pass through this wrapper so a
+// debounced, import-compatible history snapshot is created after each change.
+const AsyncStorage = {
+  ...BaseAsyncStorage,
+  setItem: async (key: string, value: string): Promise<void> => {
+    await BaseAsyncStorage.setItem(key, value);
+    scheduleSettingsSnapshot(key);
+  },
+  multiSet: async (entries: readonly (readonly [string, string])[]): Promise<void> => {
+    await BaseAsyncStorage.multiSet(entries as [string, string][]);
+    scheduleSettingsSnapshot(entries.map(([key]) => key).join(', '));
+  },
+  removeItem: async (key: string): Promise<void> => {
+    await BaseAsyncStorage.removeItem(key);
+    scheduleSettingsSnapshot(key);
+  },
+  multiRemove: async (keys: readonly string[]): Promise<void> => {
+    await BaseAsyncStorage.multiRemove(keys as string[]);
+    scheduleSettingsSnapshot(keys.slice(0, 4).join(', '));
+  },
+};
 
 const KEYS = {
   URL: '@kiosk_url',
@@ -27,9 +50,11 @@ const KEYS = {
   SCREENSAVER_VIDEO_ITEMS: '@screensaver_video_items',
   SCREENSAVER_VIDEO_LOOP: '@screensaver_video_loop',
   DEFAULT_BRIGHTNESS: '@default_brightness',
+  MAX_VOLUME_PERCENT: '@kiosk_max_volume_percent',
   DISPLAY_MODE: '@kiosk_display_mode',
   EXTERNAL_APP_PACKAGE: '@kiosk_external_app_package',
   EXTERNAL_APP_MODE: '@kiosk_external_app_mode', // 'single' | 'multi'
+  EXTERNAL_APP_BACKGROUND_COLOR: '@kiosk_external_app_background_color',
   AUTO_RELAUNCH_APP: '@kiosk_auto_relaunch_app',
   OVERLAY_BUTTON_VISIBLE: '@kiosk_overlay_button_visible',
   OVERLAY_BUTTON_POSITION: '@kiosk_overlay_button_position',
@@ -74,6 +99,8 @@ const KEYS = {
   RETURN_TAP_TIMEOUT: '@kiosk_return_tap_timeout',
   RETURN_MODE: '@kiosk_return_mode', // 'tap_anywhere' | 'button'
   RETURN_BUTTON_POSITION: '@kiosk_return_button_position', // 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+  KIOSK_HOME_BUTTON_ENABLED: '@kiosk_home_button_enabled',
+  KIOSK_HOME_BUTTON_POSITION: '@kiosk_home_button_position', // 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
   VOLUME_UP_5TAP_ENABLED: '@kiosk_volume_up_5tap_enabled',
   // Blocking Overlays
   BLOCKING_OVERLAYS_ENABLED: '@kiosk_blocking_overlays_enabled',
@@ -351,6 +378,7 @@ export const StorageService = {
         KEYS.SCREENSAVER_VIDEO_ITEMS,
         KEYS.SCREENSAVER_VIDEO_LOOP,
         KEYS.DEFAULT_BRIGHTNESS,
+        KEYS.MAX_VOLUME_PERCENT,
         KEYS.DISPLAY_MODE,
         KEYS.EXTERNAL_APP_PACKAGE,
         KEYS.EXTERNAL_APP_MODE,
@@ -400,6 +428,8 @@ export const StorageService = {
         KEYS.RETURN_TAP_TIMEOUT,
         KEYS.RETURN_MODE,
         KEYS.RETURN_BUTTON_POSITION,
+        KEYS.KIOSK_HOME_BUTTON_ENABLED,
+        KEYS.KIOSK_HOME_BUTTON_POSITION,
         // Camera preference
         KEYS.MOTION_CAMERA_POSITION,
         // WebView Back Button
@@ -541,6 +571,32 @@ export const StorageService = {
     } catch (error) {
       console.error('Error getting default brightness:', error);
       return 0.5;
+    }
+  },
+
+  // Maximum media volume while Android lock task (kiosk mode) is active.
+  // 100 preserves the normal Android volume range.
+  saveMaxVolumePercent: async (value: number): Promise<void> => {
+    try {
+      const normalizedValue = Math.round(Math.max(0, Math.min(100, value)));
+      await AsyncStorage.setItem(KEYS.MAX_VOLUME_PERCENT, JSON.stringify(normalizedValue));
+    } catch (error) {
+      console.error('Error saving maximum volume:', error);
+    }
+  },
+
+  getMaxVolumePercent: async (): Promise<number> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.MAX_VOLUME_PERCENT);
+      if (value === null) return 100;
+
+      const parsedValue = Number(JSON.parse(value));
+      return Number.isFinite(parsedValue)
+        ? Math.round(Math.max(0, Math.min(100, parsedValue)))
+        : 100;
+    } catch (error) {
+      console.error('Error getting maximum volume:', error);
+      return 100;
     }
   },
 
@@ -856,6 +912,24 @@ export const StorageService = {
     } catch (error) {
       console.error('Error getting external app mode:', error);
       return 'single';
+    }
+  },
+
+  saveExternalAppBackgroundColor: async (value: string): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.EXTERNAL_APP_BACKGROUND_COLOR, value);
+    } catch (error) {
+      console.error('Error saving external app background color:', error);
+    }
+  },
+
+  getExternalAppBackgroundColor: async (): Promise<string> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.EXTERNAL_APP_BACKGROUND_COLOR);
+      return value && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? value : '#333';
+    } catch (error) {
+      console.error('Error getting external app background color:', error);
+      return '#333';
     }
   },
 
@@ -1404,6 +1478,7 @@ export const StorageService = {
   saveRestApiKey: async (key: string): Promise<void> => {
     try {
       await saveSecureApiKey(key);
+      scheduleSettingsSnapshot(KEYS.REST_API_KEY);
     } catch (error) {
       console.error('Error saving REST API key:', error);
     }
@@ -1585,6 +1660,43 @@ export const StorageService = {
     } catch (error) {
       console.error('Error getting return button position:', error);
       return 'bottom-right';
+    }
+  },
+
+  // One-tap button shown above external apps to return to the kiosk app grid.
+  saveKioskHomeButtonEnabled: async (value: boolean): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.KIOSK_HOME_BUTTON_ENABLED, JSON.stringify(value));
+    } catch (error) {
+      console.error('Error saving kiosk home button enabled:', error);
+    }
+  },
+
+  getKioskHomeButtonEnabled: async (): Promise<boolean> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.KIOSK_HOME_BUTTON_ENABLED);
+      return value === null ? true : JSON.parse(value);
+    } catch (error) {
+      console.error('Error getting kiosk home button enabled:', error);
+      return true;
+    }
+  },
+
+  saveKioskHomeButtonPosition: async (value: string): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.KIOSK_HOME_BUTTON_POSITION, value);
+    } catch (error) {
+      console.error('Error saving kiosk home button position:', error);
+    }
+  },
+
+  getKioskHomeButtonPosition: async (): Promise<string> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.KIOSK_HOME_BUTTON_POSITION);
+      return value || 'bottom-left';
+    } catch (error) {
+      console.error('Error getting kiosk home button position:', error);
+      return 'bottom-left';
     }
   },
 

@@ -253,7 +253,7 @@ const AdvancedTab: React.FC<AdvancedTabProps> = ({
 
         <SettingsInfoBox variant="info" title="ℹ️ Why is this needed?">
           <Text style={styles.infoText}>
-            The Accessibility Service allows FreeKiosk to send keyboard input (remote control, text input) to external apps.{'\n\n'}
+            The Accessibility Service allows FreeKiosk to send keyboard input to external apps and immediately close unauthorized Settings or app windows that appear above the kiosk.{'\n\n'}
             Without it, keyboard emulation only works inside FreeKiosk's own WebView.
           </Text>
         </SettingsInfoBox>
@@ -284,7 +284,7 @@ const AdvancedTab: React.FC<AdvancedTabProps> = ({
 
         {accessibilityRunning && (
           <Text style={styles.hint}>
-            ✅ Keyboard emulation is available for all apps (WebView + External Apps).
+            ✅ Keyboard emulation and immediate foreground protection are active.
           </Text>
         )}
 

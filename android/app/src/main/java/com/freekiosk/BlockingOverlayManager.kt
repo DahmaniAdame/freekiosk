@@ -136,13 +136,26 @@ class BlockingOverlayManager(private val context: Context) {
      */
     private fun createOverlayView(region: BlockingRegion): View {
         return View(context).apply {
+            val widthPercent = (region.xEnd - region.xStart).coerceAtLeast(0f)
+            val heightPercent = (region.yEnd - region.yStart).coerceAtLeast(0f)
+            val coversMostOfScreen = widthPercent * heightPercent >= 6000f
+
             // Set background color based on display mode
-            setBackgroundColor(when (region.displayMode) {
-                BlockingRegion.MODE_TRANSPARENT -> Color.TRANSPARENT
-                BlockingRegion.MODE_SEMI_TRANSPARENT -> Color.argb(128, 64, 64, 64)
-                BlockingRegion.MODE_OPAQUE -> Color.argb(230, 32, 32, 32)
-                else -> Color.TRANSPARENT
-            })
+            // A large opaque region can hide the allowed app completely on Android
+            // boards with unusual window metrics. Keep large protection regions
+            // touch-blocking but visually transparent so the active app stays visible.
+            setBackgroundColor(
+                if (coversMostOfScreen) {
+                    Color.TRANSPARENT
+                } else {
+                    when (region.displayMode) {
+                        BlockingRegion.MODE_TRANSPARENT -> Color.TRANSPARENT
+                        BlockingRegion.MODE_SEMI_TRANSPARENT -> Color.argb(128, 64, 64, 64)
+                        BlockingRegion.MODE_OPAQUE -> Color.argb(230, 32, 32, 32)
+                        else -> Color.TRANSPARENT
+                    }
+                }
+            )
             
             // Block all touches - the view consumes touch events
             isClickable = true

@@ -479,6 +479,7 @@ class BluetoothControlModule(private val reactContext: ReactApplicationContext) 
             }
 
             val pairingPackages = resolveBluetoothPairingDialogPackages()
+            KioskForegroundGuard.temporarilyAllowPackages(pairingPackages)
             val updated = (currentPackages.toList() + pairingPackages).distinct()
             if (updated.toSet() != currentPackages.toSet()) {
                 dpm.setLockTaskPackages(admin, updated.toTypedArray())
@@ -491,6 +492,7 @@ class BluetoothControlModule(private val reactContext: ReactApplicationContext) 
 
     private fun restoreBluetoothPairingLockTaskPackages() {
         val original = bluetoothPairingOriginalLockTaskPackages ?: return
+        val temporaryPackages = resolveBluetoothPairingDialogPackages()
         try {
             val dpm = reactContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val admin = ComponentName(reactContext, DeviceAdminReceiver::class.java)
@@ -501,6 +503,7 @@ class BluetoothControlModule(private val reactContext: ReactApplicationContext) 
         } catch (e: Exception) {
             android.util.Log.w("BluetoothControlModule", "Could not restore lock task packages after Bluetooth pairing: ${e.message}")
         } finally {
+            KioskForegroundGuard.revokeTemporaryPackages(temporaryPackages)
             bluetoothPairingOriginalLockTaskPackages = null
         }
     }

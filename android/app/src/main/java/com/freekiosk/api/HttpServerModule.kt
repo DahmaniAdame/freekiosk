@@ -44,6 +44,7 @@ import com.freekiosk.DeviceAdminReceiver
 import com.freekiosk.CameraPhotoModule
 import com.freekiosk.FreeKioskAccessibilityService
 import com.freekiosk.ScreenController
+import com.freekiosk.VolumeLimitManager
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -241,6 +242,7 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
             }
 
             server = KioskHttpServer(
+                appContext = reactContext.applicationContext,
                 port = port,
                 apiKey = if (apiKey.isNullOrEmpty()) null else apiKey,
                 allowControl = allowControl,
@@ -1065,9 +1067,10 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
         try {
             val audioManager = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            val targetVolume = (value * maxVolume / 100).coerceIn(0, maxVolume)
+            val effectiveValue = VolumeLimitManager.clampRequestedPercent(reactContext, value)
+            val targetVolume = (effectiveValue * maxVolume / 100).coerceIn(0, maxVolume)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVolume, 0)
-            Log.d(TAG, "Volume set to $value% (raw: $targetVolume/$maxVolume)")
+            Log.d(TAG, "Volume set to $effectiveValue% (raw: $targetVolume/$maxVolume)")
             promise.resolve(true)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set volume", e)

@@ -167,6 +167,8 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
 
                 // Explicitly stop KioskWatchdogService (#96 fix)
                 stopKioskWatchdog()
+                KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
+                KioskSystemUiPolicy.restore(reactApplicationContext)
 
                 activity.runOnUiThread {
                     try {
@@ -174,6 +176,7 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
                         if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
                             dpm.setScreenCaptureDisabled(adminComponent, false)
+                            dpm.setStatusBarDisabled(adminComponent, false)
                         }
                         activity.disableKioskRestrictions()
                         activity.stopLockTask()
@@ -301,11 +304,12 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
 
                         if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
-                            // Build whitelist: FreeKiosk + external app + all managed apps
+                            // Strict visible-app allowlist: FreeKiosk home + the active
+                            // single app, or apps explicitly shown on the multi-app home.
                             val whitelist = mutableListOf(reactApplicationContext.packageName)
 
                             // Use the passed parameter directly (more reliable than SharedPreferences timing)
-                            if (!externalAppPackage.isNullOrEmpty()) {
+                            if (!externalAppPackage.isNullOrEmpty() && isSingleExternalAppMode()) {
                                 try {
                                     reactApplicationContext.packageManager.getPackageInfo(externalAppPackage, 0)
                                     whitelist.add(externalAppPackage)
@@ -315,8 +319,10 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                                 }
                             }
 
-                            // Add all managed apps to the lock task whitelist
-                            whitelist.addAll(getManagedAppPackages())
+                            // Background-only managed apps are intentionally excluded.
+                            if (isMultiExternalAppMode()) {
+                                whitelist.addAll(getManagedAppPackages())
+                            }
 
                             // Add print spooler packages if printing is enabled
                             if (isPrintEnabled()) {
@@ -363,9 +369,13 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                                     lockTaskFeatures = lockTaskFeatures or DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
                                 }
 
+                                // Device Owner lockdown: no system surfaces can be
+                                // revealed above the kiosk or its active allowed app.
+                                lockTaskFeatures = DevicePolicyManager.LOCK_TASK_FEATURE_NONE
                                 dpm.setLockTaskFeatures(adminComponent, lockTaskFeatures)
                                 android.util.Log.d("KioskModule", "Lock task features set: blockPowerButton=${!allowPowerButton}, notifications=$allowNotifications, systemInfo=$allowSystemInfo, keyguard=$screenLockCompat (flags=$lockTaskFeatures)")
                             }
+                            dpm.setStatusBarDisabled(adminComponent, true)
 
                             dpm.setLockTaskPackages(adminComponent, uniqueWhitelist.toTypedArray())
                             activity.startLockTask()
@@ -393,9 +403,15 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                                 android.util.Log.w("KioskModule", "Could not unmute audio streams: ${e.message}")
                             }
                         } else {
-                            activity.startLockTask()
-                            android.util.Log.d("KioskModule", "Screen pinning started")
+                            if (isSingleExternalAppMode() || isMultiExternalAppMode()) {
+                                KioskSystemUiPolicy.enable(reactApplicationContext)
+                                android.util.Log.d("KioskModule", "External app mode without Device Owner: screen pinning skipped")
+                            } else {
+                                activity.startLockTask()
+                                android.util.Log.d("KioskModule", "Screen pinning started")
+                            }
                         }
+                        VolumeLimitManager.enforce(reactApplicationContext)
                         promise.resolve(true)
                     } catch (e: Exception) {
                         android.util.Log.e("KioskModule", "Failed to start lock task: ${e.message}")
@@ -421,7 +437,10 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
                         if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
                             dpm.setScreenCaptureDisabled(adminComponent, false)
+                            dpm.setStatusBarDisabled(adminComponent, false)
                         }
+                        KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
+                        KioskSystemUiPolicy.restore(reactApplicationContext)
                         activity.stopLockTask()
                         android.util.Log.d("KioskModule", "Lock task stopped")
                         promise.resolve(true)
@@ -1441,6 +1460,7 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                 val packages = mutableListOf<String>()
                 for (i in 0 until apps.length()) {
                     val app = apps.getJSONObject(i)
+                    if (!app.optBoolean("showOnHomeScreen", false)) continue
                     val pkg = app.getString("packageName")
                     // Verify app is still installed
                     try {
@@ -1463,9 +1483,52 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
         }
     }
 
+    private fun isSingleExternalAppMode(): Boolean {
+        return getExternalAppMode() == "single"
+    }
+
+    private fun isMultiExternalAppMode(): Boolean {
+        return try {
+            val displayMode = readAsyncStorageValue(
+                "@kiosk_display_mode",
+                "webview"
+            )
+            displayMode == "external_app" && getExternalAppMode() == "multi"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun getExternalAppMode(): String {
+        return readAsyncStorageValue("@kiosk_external_app_mode", "single")
+    }
+
+    private fun readAsyncStorageValue(key: String, defaultValue: String): String {
+        var database: android.database.sqlite.SQLiteDatabase? = null
+        return try {
+            val dbPath = reactApplicationContext.getDatabasePath("RKStorage").absolutePath
+            database = android.database.sqlite.SQLiteDatabase.openDatabase(
+                dbPath,
+                null,
+                android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+            )
+            database.rawQuery(
+                "SELECT value FROM catalystLocalStorage WHERE key = ?",
+                arrayOf(key)
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) ?: defaultValue else defaultValue
+            }
+        } catch (_: Exception) {
+            defaultValue
+        } finally {
+            database?.close()
+        }
+    }
+
     @ReactMethod
     fun bringToFront(promise: Promise) {
         try {
+            KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
             val am = reactApplicationContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             val tasks = am.appTasks
             for (task in tasks) {

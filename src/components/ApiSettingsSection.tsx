@@ -279,7 +279,7 @@ export const ApiSettingsSection: React.FC<ApiSettingsSectionProps> = ({
             value={allowControl}
             onValueChange={handleAllowControlChange}
             icon="remote"
-            hint="Enable POST commands (brightness, reload, etc.)"
+            hint="Enable control commands. APK updates and settings history also require a non-empty API key."
           />
 
           {/* API Endpoints Info */}
@@ -318,6 +318,9 @@ export const ApiSettingsSection: React.FC<ApiSettingsSectionProps> = ({
                 <Text style={styles.endpoint}>/api/js - Execute JavaScript</Text>
                 <Text style={styles.endpoint}>/api/clearCache - Clear WebView cache</Text>
                 <Text style={styles.endpoint}>/api/app/launch - Launch external app</Text>
+                <Text style={styles.endpoint}>/api/update - Upload and install a signed APK</Text>
+                <Text style={styles.endpoint}>/api/settings/history - List settings snapshots</Text>
+                <Text style={styles.endpoint}>/api/settings/history/latest - Download latest import JSON</Text>
                 <Text style={styles.endpoint}>/api/reboot - Reboot (Device Owner)</Text>
                 <Text style={styles.endpoint}>/api/audio/play - Play audio URL</Text>
                 <Text style={styles.endpoint}>/api/audio/stop - Stop audio</Text>

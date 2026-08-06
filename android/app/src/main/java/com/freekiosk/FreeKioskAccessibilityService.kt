@@ -591,9 +591,12 @@ class FreeKioskAccessibilityService : AccessibilityService() {
         if (pkg.isNullOrBlank()) return
         try {
             BlockingOverlayManager.getInstance(this).setForegroundPackage(pkg)
+            OverlayService.updateForegroundPackage(pkg)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update foreground package for blocking overlays: ${e.message}")
         }
+
+        KioskForegroundGuard.handleAccessibilityWindow(this, event, pkg)
     }
 
     override fun onInterrupt() {

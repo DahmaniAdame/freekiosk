@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, StyleSheet, TouchableOpacity, TouchableWithoutFeedback, Text, NativeEventEmitter, NativeModules, AppState, DeviceEventEmitter, Dimensions, Pressable, BackHandler, Keyboard } from 'react-native';
+import { View, StyleSheet, TouchableOpacity, TouchableWithoutFeedback, Text, NativeEventEmitter, NativeModules, AppState, DeviceEventEmitter, Dimensions, Pressable, BackHandler, Keyboard, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import RNBrightness from '../utils/BrightnessModule';
 import { useIsFocused, useFocusEffect } from '@react-navigation/native';
@@ -28,6 +28,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
 import Icon from '../components/Icon';
 import { revokeSettingsAccess } from '../utils/authState';
+import { scheduleSettingsSnapshot } from '../utils/SettingsHistoryService';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 
 const { HttpServerModule } = NativeModules;
@@ -99,6 +100,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   // Managed Apps (multi-app mode, background apps, accessibility whitelist)
   const [managedApps, setManagedApps] = useState<import('../types/managedApps').ManagedApp[]>([]);
   const [externalAppMode, setExternalAppMode] = useState<'single' | 'multi'>('single');
+  const [externalAppBackgroundColor, setExternalAppBackgroundColor] = useState<string>('#333');
   const externalAppModeRef = useRef<'single' | 'multi'>('single');
   
   // Spatial proximity detection for N-tap (WebView mode)
@@ -114,6 +116,8 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   const [returnTapTimeout, setReturnTapTimeout] = useState<number>(1500);
   const [returnMode, setReturnMode] = useState<string>('tap_anywhere');
   const [returnButtonPosition, setReturnButtonPosition] = useState<string>('bottom-right');
+  const [kioskHomeButtonEnabled, setKioskHomeButtonEnabled] = useState<boolean>(true);
+  const [kioskHomeButtonPosition, setKioskHomeButtonPosition] = useState<string>('bottom-left');
   
   // URL Rotation states
   const [urlRotationEnabled, setUrlRotationEnabled] = useState<boolean>(false);
@@ -1345,7 +1349,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       'onAppReturned',
       (event: any) => {
         // Set guard SYNCHRONOUSLY (before any setTimeout) to prevent race with loadSettings
-        if (event?.voluntary) {
+        if (event?.voluntary && !event?.home) {
           isNavigatingToPinRef.current = true;
           // Cancel any pending relaunch timeout
           if (appLaunchTimeoutRef.current) {
@@ -1428,6 +1432,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
           }
           if (entries.length > 0) {
             await AsyncStorage.multiSet(entries);
+            scheduleSettingsSnapshot('ADB configuration import');
             console.log('[KioskScreen] Applied', entries.length, 'pending ADB config entries to AsyncStorage');
           }
           await KioskModule.clearPendingAdbConfig();
@@ -1562,7 +1567,12 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       
       // Load external app sub-mode (single vs multi)
       const savedExternalAppMode = (str(K.EXTERNAL_APP_MODE) ?? 'single') as 'single' | 'multi';
+      const storedExternalAppBackgroundColor = str(K.EXTERNAL_APP_BACKGROUND_COLOR) ?? '#333';
+      const savedExternalAppBackgroundColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(storedExternalAppBackgroundColor)
+        ? storedExternalAppBackgroundColor
+        : '#333';
       setExternalAppMode(savedExternalAppMode);
+      setExternalAppBackgroundColor(savedExternalAppBackgroundColor);
       externalAppModeRef.current = savedExternalAppMode;
       console.log('[KioskScreen] External app mode:', savedExternalAppMode);
       
@@ -1572,11 +1582,15 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       const savedReturnTapTimeout = num(K.RETURN_TAP_TIMEOUT, 1500);
       const savedReturnMode = str(K.RETURN_MODE) ?? 'tap_anywhere';
       const savedReturnButtonPosition = str(K.RETURN_BUTTON_POSITION) ?? 'bottom-right';
+      const savedKioskHomeButtonEnabled = bool(K.KIOSK_HOME_BUTTON_ENABLED, true);
+      const savedKioskHomeButtonPosition = str(K.KIOSK_HOME_BUTTON_POSITION) ?? 'bottom-left';
       setReturnButtonVisible(savedReturnButtonVisible);
       setReturnTapCount(savedReturnTapCount);
       setReturnTapTimeout(savedReturnTapTimeout);
       setReturnMode(savedReturnMode);
       setReturnButtonPosition(savedReturnButtonPosition);
+      setKioskHomeButtonEnabled(savedKioskHomeButtonEnabled);
+      setKioskHomeButtonPosition(savedKioskHomeButtonPosition);
       
       // Load URL Rotation settings
       const savedUrlRotationEnabled = bool(K.URL_ROTATION_ENABLED, false);
@@ -1860,7 +1874,8 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
               await OverlayServiceModule.startOverlayService(
                 savedReturnTapCount, savedReturnTapTimeout, savedReturnMode,
                 savedReturnButtonPosition, savedExternalAppPackage,
-                autoRelaunchApp, allowNotifications
+                autoRelaunchApp, allowNotifications,
+                savedKioskHomeButtonEnabled, savedKioskHomeButtonPosition
               );
             } catch (e) {
               console.warn('[KioskScreen] Failed to pre-start overlay before boot apps:', e);
@@ -2423,7 +2438,9 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
           finalButtonPosition,
           packageName, // Pass locked package for monitoring
           autoRelaunchApp, // Pass auto-relaunch setting
-          allowNotifications // Pass NFC enabled flag for monitoring filter
+          allowNotifications, // Pass NFC enabled flag for monitoring filter
+          kioskHomeButtonEnabled,
+          kioskHomeButtonPosition
         );
         console.log(`[KioskScreen] OverlayService started with tapCount=${finalTapCount}, tapTimeout=${finalTapTimeout}, mode=${finalReturnMode}, position=${finalButtonPosition}, package=${packageName}, autoRelaunch=${autoRelaunchApp}, nfcEnabled=${allowNotifications}`);
       } catch (overlayError) {
@@ -2435,6 +2452,12 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       setIsAppLaunched(true);
     } catch (error) {
       console.error('[KioskScreen] Failed to launch app:', error);
+      if ((error as { code?: string })?.code === 'LOCK_TASK_NOT_ACTIVE') {
+        Alert.alert(
+          'Secure kiosk setup required',
+          'FreeKiosk did not open the app because Android Device Owner lock task is not active. Device Owner is required to remove and block the Android taskbar, Home, Back, Recents, and notifications.',
+        );
+      }
     }
   };
 
@@ -2642,6 +2665,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
           externalAppPackage={externalAppPackage}
           managedApps={managedApps}
           externalAppMode={externalAppMode}
+          backgroundColor={externalAppBackgroundColor}
           isAppLaunched={isAppLaunched}
           backButtonMode={backButtonMode}
           returnTapCount={returnTapCount}

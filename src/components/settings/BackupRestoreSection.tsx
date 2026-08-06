@@ -323,7 +323,7 @@ const BackupRestoreSection: React.FC<BackupRestoreSectionProps> = ({
       </View>
       
       <Text style={styles.description}>
-        Export your current configuration or restore from a previous backup.
+        Export your current configuration or restore from a previous backup. FreeKiosk also keeps the latest 30 settings changes as import-ready JSON files for update recovery and the REST API.
         PIN codes are not included in backups for security.
       </Text>
 

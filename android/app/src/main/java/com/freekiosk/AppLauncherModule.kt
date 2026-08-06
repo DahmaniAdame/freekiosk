@@ -31,18 +31,60 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
                 val currentActivity = reactApplicationContext.currentActivity
-                
-                // Si Lock Task est activé, s'assurer que l'app est dans la whitelist AVANT de lancer
-                if (currentActivity != null && currentActivity is MainActivity) {
-                    val mainActivity = currentActivity as MainActivity
-                    if (mainActivity.isTaskLocked()) {
-                        DebugLog.d("AppLauncherModule", "In Lock Task mode - updating whitelist and features before launch")
+                var deviceOwnerLockTaskReady = true
+
+                // Authorize the exact app selected from the kiosk grid before Android
+                // emits its first window event. AsyncStorage can lag one frame behind a
+                // just-saved grid change, so the accessibility guard must not use that
+                // stale snapshot to pop the selected app immediately.
+                KioskForegroundGuard.authorizeKioskLaunch(
+                    reactApplicationContext,
+                    packageName
+                )
+                KioskSystemUiPolicy.enable(reactApplicationContext)
+
+                // Device Owner: always add the selected app to the lock-task allowlist
+                // before launch. Do this even while lock task is still entering; gating it
+                // on isTaskLocked() left a startup race where Android silently refused the
+                // activity and FreeKiosk remained visible.
+                if (currentActivity is MainActivity) {
+                    val mainActivity = currentActivity
+                    try {
+                        val activityManager = reactApplicationContext.getSystemService(
+                            android.content.Context.ACTIVITY_SERVICE
+                        ) as android.app.ActivityManager
+                        if (activityManager.lockTaskModeState ==
+                            android.app.ActivityManager.LOCK_TASK_MODE_PINNED) {
+                            // Screen pinning cannot switch apps. Leave pinned mode so the
+                            // selected app can open; the accessibility guard and overlay
+                            // continue enforcing the configured kiosk allowlist.
+                            mainActivity.stopLockTask()
+                            DebugLog.d("AppLauncherModule", "Stopped screen pinning before allowed app launch")
+                        }
+                    } catch (e: Exception) {
+                        DebugLog.d("AppLauncherModule", "Could not inspect screen pinning state: ${e.message}")
+                    }
+
+                    DebugLog.d("AppLauncherModule", "Updating lock-task allowlist before launch")
                         
-                        try {
+                    try {
                             val dpm = reactApplicationContext.getSystemService(android.content.Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
                             val adminComponent = android.content.ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
                             
                             if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
+                                // Update the allowlist first. Feature configuration is an
+                                // optional refinement and must never prevent app launch on
+                                // OEMs that reject one of the feature flags.
+                                val currentWhitelist = dpm.getLockTaskPackages(adminComponent).toMutableList()
+                                if (!currentWhitelist.contains(reactApplicationContext.packageName)) {
+                                    currentWhitelist.add(reactApplicationContext.packageName)
+                                }
+                                if (!currentWhitelist.contains(packageName)) {
+                                    currentWhitelist.add(packageName)
+                                    DebugLog.d("AppLauncherModule", "Added $packageName to Lock Task whitelist")
+                                }
+                                dpm.setLockTaskPackages(adminComponent, currentWhitelist.distinct().toTypedArray())
+
                                 // Configure lock task features respecting user settings
                                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                                     // Start with GLOBAL_ACTIONS as base (Android default, prevents Samsung audio mute)
@@ -95,26 +137,92 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                                         DebugLog.d("AppLauncherModule", "Could not read settings, using GLOBAL_ACTIONS default: ${e.message}")
                                     }
 
+                                    // Strict Android Enterprise kiosk surface: no Home,
+                                    // Overview, notifications, system info, keyguard, or
+                                    // global actions while a child-facing app is active.
+                                    lockTaskFeatures = android.app.admin.DevicePolicyManager.LOCK_TASK_FEATURE_NONE
                                     dpm.setLockTaskFeatures(adminComponent, lockTaskFeatures)
                                     DebugLog.d("AppLauncherModule", "Lock task features applied before launching external app")
                                 }
-                                
-                                // Mettre à jour la whitelist pour inclure cette app
-                                val currentWhitelist = dpm.getLockTaskPackages(adminComponent).toMutableList()
-                                if (!currentWhitelist.contains(packageName)) {
-                                    currentWhitelist.add(packageName)
-                                    dpm.setLockTaskPackages(adminComponent, currentWhitelist.toTypedArray())
-                                    DebugLog.d("AppLauncherModule", "Added $packageName to Lock Task whitelist")
+                                dpm.setStatusBarDisabled(adminComponent, true)
+
+                                // Never launch an allowed app into an unrestricted task.
+                                // MainActivity is foreground while the grid is visible, so
+                                // this is the reliable point to enter full Device Owner lock
+                                // task before Android creates the external app's task.
+                                val activityManager = reactApplicationContext.getSystemService(
+                                    android.content.Context.ACTIVITY_SERVICE
+                                ) as android.app.ActivityManager
+                                if (activityManager.lockTaskModeState !=
+                                    android.app.ActivityManager.LOCK_TASK_MODE_LOCKED) {
+                                    try {
+                                        mainActivity.startLockTask()
+                                    } catch (e: Exception) {
+                                        DebugLog.errorProduction(
+                                            "AppLauncherModule",
+                                            "Could not enter strict lock task before app launch: ${e.message}"
+                                        )
+                                    }
                                 }
+                                deviceOwnerLockTaskReady = activityManager.lockTaskModeState ==
+                                    android.app.ActivityManager.LOCK_TASK_MODE_LOCKED
                             }
-                        } catch (e: Exception) {
-                            DebugLog.errorProduction("AppLauncherModule", "Failed to update lock task config: ${e.message}")
+                    } catch (e: Exception) {
+                        DebugLog.errorProduction("AppLauncherModule", "Failed to update lock task config: ${e.message}")
+                    }
+
+                    // Verify the security boundary independently of the optional UI
+                    // policy calls above. Some OEMs reject a status-bar refinement but
+                    // still support standard Device Owner lock task.
+                    try {
+                        val dpm = reactApplicationContext.getSystemService(
+                            android.content.Context.DEVICE_POLICY_SERVICE
+                        ) as android.app.admin.DevicePolicyManager
+                        if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
+                            val activityManager = reactApplicationContext.getSystemService(
+                                android.content.Context.ACTIVITY_SERVICE
+                            ) as android.app.ActivityManager
+                            if (activityManager.lockTaskModeState !=
+                                android.app.ActivityManager.LOCK_TASK_MODE_LOCKED) {
+                                mainActivity.startLockTask()
+                            }
+                            deviceOwnerLockTaskReady = activityManager.lockTaskModeState ==
+                                android.app.ActivityManager.LOCK_TASK_MODE_LOCKED
+                        } else {
+                            // Multi-app child kiosks cannot securely suppress Android's
+                            // taskbar/navigation gestures in ordinary app mode. Fail
+                            // closed instead of opening the selected app unrestricted.
+                            deviceOwnerLockTaskReady = false
                         }
+                    } catch (e: Exception) {
+                        DebugLog.errorProduction(
+                            "AppLauncherModule",
+                            "Strict lock-task verification failed: ${e.message}"
+                        )
+                        deviceOwnerLockTaskReady = false
                     }
                 }
 
-                // Lancer l'app via le context
-                reactApplicationContext.startActivity(launchIntent)
+                if (!deviceOwnerLockTaskReady) {
+                    KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
+                    promise.reject(
+                        "LOCK_TASK_NOT_ACTIVE",
+                        "Strict kiosk lock task could not be activated; the app was not launched"
+                    )
+                    return
+                }
+
+                // Record the selected allowed app before its first window event. This
+                // makes it the recovery target if an OEM briefly exposes another task.
+                KioskForegroundGuard.noteAllowedForeground(reactApplicationContext, packageName)
+                BlockingOverlayManager.getInstance(reactApplicationContext)
+                    .setForegroundPackage(packageName)
+
+                // Use the application context with NEW_TASK. This creates/raises the
+                // external app's own task on vendor Android builds; launching from
+                // MainActivity can be folded back into the FreeKiosk task and leave the
+                // kiosk grid visible.
+                KioskTaskLauncher.launch(reactApplicationContext, launchIntent)
                 DebugLog.d("AppLauncherModule", "External app launched: $packageName")
 
                 // Send event to React Native
@@ -354,6 +462,15 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
      */
     @ReactMethod
     fun launchBootApps(promise: Promise) {
+        if (KioskForegroundGuard.isProtectionActive(reactApplicationContext)) {
+            // Launching an Activity is never a background operation on Android. In
+            // child-facing kiosk mode it can surface over the selected app, so defer
+            // all app starts to an explicit grid selection.
+            DebugLog.d("AppLauncherModule", "Skipping launch-on-boot apps while kiosk protection is active")
+            promise.resolve(0)
+            return
+        }
+
         executor.execute {
             try {
                 val apps = getManagedAppsFiltered { it.optBoolean("launchOnBoot", false) }
@@ -405,6 +522,15 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
     @ReactMethod
     fun startBackgroundMonitor(promise: Promise) {
         try {
+            if (KioskForegroundGuard.isProtectionActive(reactApplicationContext)) {
+                reactApplicationContext.stopService(
+                    Intent(reactApplicationContext, BackgroundAppMonitorService::class.java)
+                )
+                DebugLog.d("AppLauncherModule", "Visible keep-alive relaunch disabled in kiosk mode")
+                promise.resolve(false)
+                return
+            }
+
             // Pre-check: only start the foreground service if there are keep-alive apps
             // This avoids the ForegroundServiceDidNotStartInTimeException crash
             val keepAliveApps = getManagedAppsFiltered { it.optBoolean("keepAlive", false) }

@@ -1,15 +1,22 @@
 package com.freekiosk.api
 
+import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONObject
 import org.json.JSONArray
 import android.util.Log
+import com.freekiosk.ApiUpdateManager
+import com.freekiosk.BuildConfig
+import com.freekiosk.SettingsHistoryStore
+import com.freekiosk.UpdateValidationException
+import java.io.File
 
 /**
  * FreeKiosk REST API Server
  * Lightweight HTTP server for Home Assistant integration
  */
 class KioskHttpServer(
+    private val appContext: Context,
     port: Int,
     private val apiKey: String?,
     private val allowControl: Boolean,
@@ -18,6 +25,8 @@ class KioskHttpServer(
     private val screenshotProvider: (() -> java.io.InputStream?)? = null,
     private val cameraPhotoProvider: ((camera: String, quality: Int) -> java.io.InputStream?)? = null
 ) : NanoHTTPD(port) {
+
+    private val updateManager = ApiUpdateManager(appContext)
 
     companion object {
         private const val TAG = "KioskHttpServer"
@@ -60,7 +69,7 @@ class KioskHttpServer(
         val postOnlyUris = setOf(
             "/api/url", "/api/navigate", "/api/tts", "/api/toast",
             "/api/app/launch", "/api/js", "/api/audio/play", "/api/remote/text",
-            "/api/mode"
+            "/api/mode", "/api/update"
         )
 
         val response = try {
@@ -79,6 +88,8 @@ class KioskHttpServer(
                 isGetOrPost && uri == "/api/screenshot" -> handleScreenshot()
                 isGetOrPost && uri == "/api/camera/list" -> handleCameraList()
                 isGetOrPost && uri == "/api/location" -> handleGetLocation()
+                method == Method.GET && uri == "/api/settings/history" -> handleSettingsHistoryList()
+                method == Method.GET && uri.startsWith("/api/settings/history/") -> handleSettingsHistoryDownload(uri)
                 isGetOrPost && uri == "/" -> handleRoot()
 
                 // Read endpoints that also have a POST variant — POST with body sets, GET/POST without body reads
@@ -102,6 +113,7 @@ class KioskHttpServer(
                 method == Method.POST && uri == "/api/js" -> handleExecuteJs(session)
                 method == Method.POST && uri == "/api/audio/play" -> handleAudioPlay(session)
                 method == Method.POST && uri == "/api/remote/text" -> handleKeyboardText(session)
+                method == Method.POST && uri == "/api/update" -> handleApkUpdate(session)
 
                 // Control endpoints (accept both GET and POST for convenience)
                 isGetOrPost && uri == "/api/screen/on" -> handleScreenOn()
@@ -176,6 +188,8 @@ class KioskHttpServer(
                     put("/api/camera/list - List available cameras")
                     put("/api/volume - Get current volume {level, maxLevel}")
                     put("/api/location - GPS coordinates (latitude, longitude, accuracy)")
+                    put("/api/settings/history - List import-ready settings snapshots")
+                    put("/api/settings/history/{id|latest} - Download a settings snapshot")
                 })
                 put("POST", JSONArray().apply {
                     put("/api/brightness - Set brightness {value: 0-100}")
@@ -189,6 +203,7 @@ class KioskHttpServer(
                     put("/api/js - Execute JavaScript {code: string}")
                     put("/api/audio/play - Play audio {url: string, loop: bool, volume: 0-100}")
                     put("/api/remote/text - Type text {text: string}")
+                    put("/api/update - Upload a newer signed APK (multipart field: apk)")
                 })
                 put("GET or POST", JSONArray().apply {
                     put("/api/screen/on - Turn screen on")
@@ -274,6 +289,70 @@ class KioskHttpServer(
             return jsonError(Response.Status.FORBIDDEN, "Remote control is disabled")
         }
         return null
+    }
+
+    private fun checkSensitiveControlAllowed(): Response? {
+        checkControlAllowed()?.let { return it }
+        if (apiKey.isNullOrBlank()) {
+            return jsonError(
+                Response.Status.FORBIDDEN,
+                "Configure a non-empty API key before using updates or settings history"
+            )
+        }
+        return null
+    }
+
+    private fun handleApkUpdate(session: IHTTPSession): Response {
+        checkSensitiveControlAllowed()?.let { return it }
+        if (!BuildConfig.ENABLE_SELF_UPDATE) {
+            return jsonError(Response.Status.FORBIDDEN, "Self-update is disabled in this build")
+        }
+        val contentType = session.headers["content-type"] ?: ""
+        if (!contentType.startsWith("multipart/form-data", ignoreCase = true)) {
+            return jsonError(Response.Status.BAD_REQUEST, "Use multipart/form-data with an 'apk' file field")
+        }
+
+        return try {
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val temporaryPath = files["apk"]
+                ?: return jsonError(Response.Status.BAD_REQUEST, "Multipart field 'apk' is required")
+            val result = updateManager.prepareAndSchedule(File(temporaryPath))
+            jsonResponse(Response.Status.ACCEPTED, result)
+        } catch (error: UpdateValidationException) {
+            jsonError(Response.Status.BAD_REQUEST, error.message ?: "APK validation failed")
+        } catch (error: Exception) {
+            Log.e(TAG, "APK upload failed", error)
+            jsonError(Response.Status.INTERNAL_ERROR, "Could not stage APK update")
+        }
+    }
+
+    private fun handleSettingsHistoryList(): Response {
+        checkSensitiveControlAllowed()?.let { return it }
+        return jsonSuccess(JSONObject().apply {
+            put("snapshots", SettingsHistoryStore.listSnapshots(appContext))
+            put("limit", 30)
+        })
+    }
+
+    private fun handleSettingsHistoryDownload(uri: String): Response {
+        checkSensitiveControlAllowed()?.let { return it }
+        val id = uri.removePrefix("/api/settings/history/")
+        val file = if (id == "latest") {
+            SettingsHistoryStore.latestFile(appContext)
+        } else {
+            SettingsHistoryStore.snapshotFile(appContext, id)
+        } ?: return jsonError(Response.Status.NOT_FOUND, "Settings snapshot not found")
+
+        return newFixedLengthResponse(
+            Response.Status.OK,
+            "application/json",
+            file.inputStream(),
+            file.length(),
+        ).apply {
+            addHeader("Content-Disposition", "attachment; filename=\"${file.name}\"")
+            addHeader("Cache-Control", "no-store")
+        }
     }
 
     private fun handleSetBrightness(session: IHTTPSession): Response {
@@ -652,12 +731,16 @@ class KioskHttpServer(
     }
 
     private fun jsonSuccess(data: JSONObject): Response {
+        return jsonResponse(Response.Status.OK, data)
+    }
+
+    private fun jsonResponse(status: Response.Status, data: JSONObject): Response {
         val response = JSONObject().apply {
             put("success", true)
             put("data", data)
             put("timestamp", System.currentTimeMillis() / 1000)
         }
-        return newFixedLengthResponse(Response.Status.OK, MIME_JSON, response.toString())
+        return newFixedLengthResponse(status, MIME_JSON, response.toString())
     }
 
     private fun jsonError(status: Response.Status, message: String): Response {

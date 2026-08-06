@@ -1,6 +1,11 @@
 package com.freekiosk
 
 import android.content.Intent
+import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 
@@ -12,7 +17,8 @@ import androidx.appcompat.app.AppCompatActivity
  * 2. Démarre l'OverlayService avec le bouton de retour
  * 3. Se ferme immédiatement pour rester en arrière-plan
  *
- * Utilisé uniquement en mode External App (non-Device Owner)
+ * Legacy launcher entry for External App Mode. A child-facing external app is
+ * launched only when Device Owner lockdown is available.
  */
 class HomeActivity : AppCompatActivity() {
 
@@ -21,8 +27,12 @@ class HomeActivity : AppCompatActivity() {
 
         // Lire la configuration depuis AsyncStorage v2 database
         val displayMode = getAsyncStorageValue("@kiosk_display_mode", "webview")
+        val kioskEnabled = getAsyncStorageValue("@kiosk_enabled", "false") == "true"
         val externalAppPackage = getAsyncStorageValue("@kiosk_external_app_package", "")
         val externalAppActivity = getAsyncStorageValue("@kiosk_external_app_activity", "")
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val secureExternalLaunchAllowed = !kioskEnabled ||
+            (dpm.isDeviceOwnerApp(packageName) && enterStrictLockTask(dpm, externalAppPackage))
         
         // Load tap settings
         val tapCountStr = getAsyncStorageValue("@kiosk_return_tap_count", "5")
@@ -33,14 +43,20 @@ class HomeActivity : AppCompatActivity() {
         // Load return mode settings
         val returnMode = getAsyncStorageValue("@kiosk_return_mode", "tap_anywhere")
         val buttonPosition = getAsyncStorageValue("@kiosk_return_button_position", "bottom-right")
+        val kioskHomeButtonEnabled = getAsyncStorageValue("@kiosk_home_button_enabled", "true") == "true"
+        val kioskHomeButtonPosition = getAsyncStorageValue("@kiosk_home_button_position", "bottom-left")
 
         DebugLog.d("HomeActivity", "Display mode: $displayMode")
         DebugLog.d("HomeActivity", "External app: $externalAppPackage / $externalAppActivity")
         DebugLog.d("HomeActivity", "Tap settings: count=$tapCount, timeout=${tapTimeout}ms, mode=$returnMode, position=$buttonPosition")
 
-        if (displayMode == "external_app" && !externalAppPackage.isNullOrEmpty()) {
+        if (displayMode == "external_app" &&
+            !externalAppPackage.isNullOrEmpty() &&
+            secureExternalLaunchAllowed) {
+            KioskSystemUiPolicy.enable(this)
+            KioskForegroundGuard.authorizeKioskLaunch(this, externalAppPackage)
             // Démarrer l'OverlayService avec le bouton de retour
-            startOverlayService(tapCount, tapTimeout, returnMode, buttonPosition)
+            startOverlayService(tapCount, tapTimeout, returnMode, buttonPosition, kioskHomeButtonEnabled, kioskHomeButtonPosition)
 
             // Start MainActivity in background (for REST API server, MQTT, etc.)
             startMainActivityInBackground()
@@ -48,12 +64,45 @@ class HomeActivity : AppCompatActivity() {
             // Lancer l'application externe
             launchExternalApp(externalAppPackage, externalAppActivity)
         } else {
-            // Sinon, lancer FreeKiosk normalement
+            if (!secureExternalLaunchAllowed) {
+                DebugLog.errorProduction(
+                    "HomeActivity",
+                    "Blocked unrestricted external-app launch: Device Owner lock task is required"
+                )
+            }
             launchFreeKiosk()
         }
 
         // Fermer HomeActivity immédiatement
         finish()
+    }
+
+    private fun enterStrictLockTask(
+        dpm: DevicePolicyManager,
+        externalAppPackage: String
+    ): Boolean {
+        return try {
+            val admin = ComponentName(this, DeviceAdminReceiver::class.java)
+            val allowlist = dpm.getLockTaskPackages(admin).toMutableSet().apply {
+                add(packageName)
+                externalAppPackage.takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+            dpm.setLockTaskPackages(admin, allowlist.toTypedArray())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
+            }
+            dpm.setStatusBarDisabled(admin, true)
+            startLockTask()
+
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            activityManager.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_LOCKED
+        } catch (e: Exception) {
+            DebugLog.errorProduction(
+                "HomeActivity",
+                "Could not activate strict lock task: ${e.message}"
+            )
+            false
+        }
     }
 
     /**
@@ -77,7 +126,7 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
-    private fun startOverlayService(tapCount: Int, tapTimeout: Long, returnMode: String, buttonPosition: String) {
+    private fun startOverlayService(tapCount: Int, tapTimeout: Long, returnMode: String, buttonPosition: String, kioskHomeButtonEnabled: Boolean, kioskHomeButtonPosition: String) {
         try {
             // Vérifier la permission overlay (Android M+)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
@@ -92,6 +141,8 @@ class HomeActivity : AppCompatActivity() {
             serviceIntent.putExtra("TAP_TIMEOUT", tapTimeout.coerceIn(500L, 5000L))
             serviceIntent.putExtra("RETURN_MODE", returnMode)
             serviceIntent.putExtra("BUTTON_POSITION", buttonPosition)
+            serviceIntent.putExtra("KIOSK_HOME_BUTTON_ENABLED", kioskHomeButtonEnabled)
+            serviceIntent.putExtra("KIOSK_HOME_BUTTON_POSITION", kioskHomeButtonPosition)
             startService(serviceIntent)
             DebugLog.d("HomeActivity", "Started OverlayService from HomeActivity with tapCount=$tapCount, tapTimeout=${tapTimeout}ms, mode=$returnMode, position=$buttonPosition")
         } catch (e: Exception) {
@@ -113,7 +164,7 @@ class HomeActivity : AppCompatActivity() {
             }
 
             if (intent != null) {
-                startActivity(intent)
+                KioskTaskLauncher.launch(this, intent)
                 DebugLog.d("HomeActivity", "Launched external app: $packageName")
             } else {
                 DebugLog.errorProduction("HomeActivity", "Cannot find launch intent for: $packageName")

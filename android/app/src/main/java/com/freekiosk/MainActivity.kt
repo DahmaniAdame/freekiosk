@@ -375,10 +375,12 @@ class MainActivity : ReactActivity() {
         // Mode Device Owner: Lock Task complet avec whitelist
         enableKioskRestrictions()
 
-        // Build whitelist: toujours FreeKiosk, + app externe si configurée, + managed apps
+        // Strict visible-app allowlist: FreeKiosk home + the active single app, or the
+        // apps explicitly shown on the multi-app home screen.
         val whitelist = mutableListOf(packageName)
 
-        if (isExternalAppMode && !externalAppPackage.isNullOrEmpty()) {
+        val externalAppMode = getAsyncStorageValue("@kiosk_external_app_mode", "single")
+        if (isExternalAppMode && externalAppMode == "single" && !externalAppPackage.isNullOrEmpty()) {
           try {
             packageManager.getPackageInfo(externalAppPackage!!, 0)
             whitelist.add(externalAppPackage!!)
@@ -388,8 +390,11 @@ class MainActivity : ReactActivity() {
           }
         }
 
-        // Add all managed apps to lock task whitelist
-        whitelist.addAll(getManagedAppPackages())
+        // Only child-facing managed apps belong in lock task. Background-only apps must
+        // never become reachable from the kiosk task.
+        if (isExternalAppMode && externalAppMode == "multi") {
+          whitelist.addAll(getManagedAppPackages())
+        }
         
         // Add print spooler packages if printing is enabled
         if (isPrintSettingEnabled()) {
@@ -415,8 +420,16 @@ class MainActivity : ReactActivity() {
         tryStartLockTask("fallback screen pinning")
       }
     } else {
-      // Mode non-Device Owner: Screen Pinning manuel (demande confirmation utilisateur)
-      tryStartLockTask("Screen Pinning mode - user confirmation required")
+      // Android screen pinning can contain only one task. Pinning FreeKiosk before
+      // external-app mode makes Android reject the selected app; unpinning later can
+      // force the system lock-screen PIN. Leave external mode unpinned on non-Device-
+      // Owner devices and use the accessibility/window guards instead. Full lockdown
+      // across multiple apps still requires Device Owner.
+      if (isExternalAppMode) {
+        DebugLog.d("MainActivity", "External app mode without Device Owner: skipping single-task screen pinning")
+      } else {
+        tryStartLockTask("Screen Pinning mode - user confirmation required")
+      }
     }
   }
 
@@ -466,9 +479,13 @@ class MainActivity : ReactActivity() {
           lockTaskFeatures = lockTaskFeatures or DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
         }
 
+        lockTaskFeatures = DevicePolicyManager.LOCK_TASK_FEATURE_NONE
         devicePolicyManager.setLockTaskFeatures(adminComponent, lockTaskFeatures)
         DebugLog.d("MainActivity", "Lock task features set: blockPowerButton=${!allowPowerButton}, notifications=$allowNotifications, systemInfo=$allowSystemInfo, keyguard=$screenLockCompat (flags=$lockTaskFeatures)")
       }
+      // Available before lock-task feature flags (API 23+), so keep the status
+      // bar and notification shade disabled on older Device Owner tablets too.
+      devicePolicyManager.setStatusBarDisabled(adminComponent, true)
       
       // Safety net: force unmute audio streams after configuring lock task
       // Samsung/OneUI devices may mute audio in LOCK_TASK_MODE_LOCKED
@@ -524,6 +541,7 @@ class MainActivity : ReactActivity() {
         )
         DebugLog.d("MainActivity", "Lock task features restored to defaults")
       }
+      devicePolicyManager.setStatusBarDisabled(adminComponent, false)
 
       val samsungUpdateApps = arrayOf(
         "com.samsung.android.app.updatecenter",
@@ -616,7 +634,7 @@ class MainActivity : ReactActivity() {
             // Restart OverlayService BEFORE launching 24Six so the button is present
             // when the external app comes to the foreground.
             startOverlayServiceFromNative(targetPkg)
-            startActivity(launchIntent)
+            KioskTaskLauncher.launch(this, launchIntent)
             // Move FreeKiosk to background so external app stays visible
             Handler(Looper.getMainLooper()).postDelayed({ moveTaskToBack(true) }, 300)
             // #203 — Deliberately NOT sending onAppReturned on this path: JS answers
@@ -722,6 +740,8 @@ class MainActivity : ReactActivity() {
       val tapTimeout = getAsyncStorageValue("@kiosk_return_tap_timeout", "1500").toIntOrNull() ?: 1500
       val returnMode = getAsyncStorageValue("@kiosk_return_mode", "button")
       val buttonPosition = getAsyncStorageValue("@kiosk_return_button_position", "bottom-right")
+      val kioskHomeButtonEnabled = getAsyncStorageValue("@kiosk_home_button_enabled", "true") == "true"
+      val kioskHomeButtonPosition = getAsyncStorageValue("@kiosk_home_button_position", "bottom-left")
       val autoRelaunch = getAsyncStorageValue("@kiosk_auto_relaunch_app", "true") == "true"
       val nfcEnabled = getAsyncStorageValue("@kiosk_allow_notifications", "false") == "true"
 
@@ -730,12 +750,14 @@ class MainActivity : ReactActivity() {
       serviceIntent.putExtra("TAP_TIMEOUT", tapTimeout.coerceIn(500, 5000).toLong())
       serviceIntent.putExtra("RETURN_MODE", returnMode)
       serviceIntent.putExtra("BUTTON_POSITION", buttonPosition)
+      serviceIntent.putExtra("KIOSK_HOME_BUTTON_ENABLED", kioskHomeButtonEnabled)
+      serviceIntent.putExtra("KIOSK_HOME_BUTTON_POSITION", kioskHomeButtonPosition)
       serviceIntent.putExtra("LOCKED_PACKAGE", lockedPackage)
       serviceIntent.putExtra("AUTO_RELAUNCH", autoRelaunch)
       serviceIntent.putExtra("NFC_ENABLED", nfcEnabled)
 
       startService(serviceIntent)
-      DebugLog.d("MainActivity", "startOverlayServiceFromNative: taps=$tapCount timeout=${tapTimeout}ms mode=$returnMode pos=$buttonPosition pkg=$lockedPackage autoRelaunch=$autoRelaunch")
+      DebugLog.d("MainActivity", "startOverlayServiceFromNative: taps=$tapCount timeout=${tapTimeout}ms mode=$returnMode pos=$buttonPosition home=$kioskHomeButtonEnabled/$kioskHomeButtonPosition pkg=$lockedPackage autoRelaunch=$autoRelaunch")
     } catch (e: Exception) {
       DebugLog.errorProduction("MainActivity", "Failed to start OverlayService from native: ${e.message}")
     }
@@ -787,6 +809,9 @@ class MainActivity : ReactActivity() {
   }
 
   private fun hideSystemUI() {
+    if (isKioskEnabled()) {
+      KioskSystemUiPolicy.enable(this)
+    }
     // Pour Android 11+ (API 30+), utiliser la nouvelle API WindowInsetsController
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
       window.insetsController?.apply {
@@ -1048,8 +1073,7 @@ class MainActivity : ReactActivity() {
   }
 
   /**
-   * Read all managed app package names from AsyncStorage.
-   * Used to add them to the lock task whitelist.
+   * Read child-facing managed apps from AsyncStorage for the lock-task allowlist.
    */
   private fun getManagedAppPackages(): List<String> {
     return try {
@@ -1058,6 +1082,7 @@ class MainActivity : ReactActivity() {
       val packages = mutableListOf<String>()
       for (i in 0 until apps.length()) {
         val app = apps.getJSONObject(i)
+        if (!app.optBoolean("showOnHomeScreen", false)) continue
         val pkg = app.getString("packageName")
         try {
           packageManager.getPackageInfo(pkg, 0)

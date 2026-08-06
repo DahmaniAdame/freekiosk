@@ -100,6 +100,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   const [screensaverVideoLoop, setScreensaverVideoLoop] = useState<boolean>(true);
   const [pickingScreensaverMedia, setPickingScreensaverMedia] = useState<boolean>(false);
   const [defaultBrightness, setDefaultBrightness] = useState<number>(0.5);
+  const [maxVolumePercent, setMaxVolumePercent] = useState<number>(100);
   const [certificates, setCertificates] = useState<CertificateInfo[]>([]);
 
   // Dashboard states
@@ -120,6 +121,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   const [isDeviceOwner, setIsDeviceOwner] = useState<boolean>(false);
   const [managedApps, setManagedApps] = useState<ManagedApp[]>([]);
   const [externalAppMode, setExternalAppMode] = useState<'single' | 'multi'>('single');
+  const [externalAppBackgroundColor, setExternalAppBackgroundColor] = useState<string>('#333');
   const [statusBarEnabled, setStatusBarEnabled] = useState<boolean>(false);
   const [statusBarOnOverlay, setStatusBarOnOverlay] = useState<boolean>(true);
   const [statusBarOnReturn, setStatusBarOnReturn] = useState<boolean>(true);
@@ -138,6 +140,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   const [returnTapCount, setReturnTapCount] = useState<string>('5');
   const [returnTapTimeout, setReturnTapTimeout] = useState<string>('1500');
   const [returnButtonPosition, setReturnButtonPosition] = useState<string>('bottom-right');
+  const [kioskHomeButtonEnabled, setKioskHomeButtonEnabled] = useState<boolean>(true);
+  const [kioskHomeButtonPosition, setKioskHomeButtonPosition] = useState<string>('bottom-left');
   const [volumeUp5TapEnabled, setVolumeUp5TapEnabled] = useState<boolean>(true);
   
   // URL Rotation states
@@ -435,6 +439,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     const savedDefaultLauncher = await StorageService.getDefaultLauncher();
     const savedScreensaverEnabled = await StorageService.getScreensaverEnabled();
     const savedDefaultBrightness = await StorageService.getDefaultBrightness();
+    const savedMaxVolumePercent = await StorageService.getMaxVolumePercent();
     const savedInactivityDelay = await StorageService.getScreensaverInactivityDelay();
     const savedMotionEnabled = await StorageService.getScreensaverMotionEnabled();
     const savedMotionSensitivity = await StorageService.getScreensaverMotionSensitivity();
@@ -466,6 +471,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     }
     setScreensaverEnabled(savedScreensaverEnabled ?? false);
     setDefaultBrightness(savedDefaultBrightness ?? 0.5);
+    setMaxVolumePercent(savedMaxVolumePercent);
     setMotionEnabled(savedMotionEnabled ?? false);
     setMotionSensitivity((savedMotionSensitivity as 'low' | 'medium' | 'high') ?? 'medium');
     setMotionCameraPosition(savedMotionCameraPosition ?? 'front');
@@ -511,6 +517,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     const savedReturnTapCount = await StorageService.getReturnTapCount();
     const savedReturnTapTimeout = await StorageService.getReturnTapTimeout();
     const savedReturnButtonPosition = await StorageService.getReturnButtonPosition();
+    const savedKioskHomeButtonEnabled = await StorageService.getKioskHomeButtonEnabled();
+    const savedKioskHomeButtonPosition = await StorageService.getKioskHomeButtonPosition();
     const savedVolumeUp5TapEnabled = await StorageService.getVolumeUp5TapEnabled();
     
     // URL Rotation settings
@@ -553,6 +561,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     // External app sub-mode
     const savedExternalAppMode = await StorageService.getExternalAppMode();
     setExternalAppMode(savedExternalAppMode);
+    const savedExternalAppBackgroundColor = await StorageService.getExternalAppBackgroundColor();
+    setExternalAppBackgroundColor(savedExternalAppBackgroundColor);
 
     setOverlayButtonVisible(savedOverlayButtonVisible);
     setPinMaxAttempts(savedPinMaxAttempts);
@@ -581,6 +591,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     setReturnTapCount(String(savedReturnTapCount));
     setReturnTapTimeout(String(savedReturnTapTimeout));
     setReturnButtonPosition(savedReturnButtonPosition);
+    setKioskHomeButtonEnabled(savedKioskHomeButtonEnabled);
+    setKioskHomeButtonPosition(savedKioskHomeButtonPosition);
     setVolumeUp5TapEnabled(savedVolumeUp5TapEnabled);
     setUrlRotationEnabled(savedUrlRotationEnabled);
     setUrlRotationList(savedUrlRotationList);
@@ -1227,6 +1239,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   // ============ SAVE FUNCTION ============
 
   const handleSave = async (): Promise<void> => {
+    const normalizedExternalAppBackgroundColor = externalAppBackgroundColor.trim();
+
     // Validation
     if (displayMode === 'webview' && !url && !dashboardModeEnabled) {
       Alert.alert('Error', 'Please enter a URL');
@@ -1253,6 +1267,11 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     }
 
     if (displayMode === 'external_app') {
+      if (!/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalizedExternalAppBackgroundColor)) {
+        Alert.alert('Error', 'Background color must be a 3- or 6-digit hex color (for example, #333 or #333333)');
+        return;
+      }
+
       if (externalAppMode === 'single') {
         // Single mode: require a package name (classic behavior)
         if (!externalAppPackage) {
@@ -1365,6 +1384,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
 
     // Save brightness management setting (applies to ALL modes)
     await StorageService.saveBrightnessManagementEnabled(brightnessManagementEnabled);
+    await StorageService.saveMaxVolumePercent(maxVolumePercent);
 
     // Screen Sleep Scheduler settings (applies to ALL modes)
     await StorageService.saveScreenSchedulerEnabled(screenSchedulerEnabled);
@@ -1416,6 +1436,11 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     await StorageService.saveDisplayMode(displayMode);
     await StorageService.saveExternalAppPackage(externalAppPackage);
     await StorageService.saveExternalAppMode(externalAppMode);
+    await StorageService.saveExternalAppBackgroundColor(
+      /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalizedExternalAppBackgroundColor)
+        ? normalizedExternalAppBackgroundColor
+        : '#333'
+    );
     await StorageService.saveAutoRelaunchApp(autoRelaunchApp);
     await StorageService.saveManagedApps(managedApps);
     await StorageService.saveOverlayButtonVisible(overlayButtonVisible);
@@ -1451,6 +1476,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     const tapTimeout = parseInt(returnTapTimeout, 10);
     await StorageService.saveReturnTapTimeout(isNaN(tapTimeout) ? 1500 : Math.max(500, Math.min(5000, tapTimeout)));
     await StorageService.saveReturnButtonPosition(returnButtonPosition);
+    await StorageService.saveKioskHomeButtonEnabled(kioskHomeButtonEnabled);
+    await StorageService.saveKioskHomeButtonPosition(kioskHomeButtonPosition);
     await StorageService.saveVolumeUp5TapEnabled(volumeUp5TapEnabled);
     
     // Save Dashboard settings
@@ -1553,7 +1580,9 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
           returnButtonPosition,
           externalAppPackage,
           autoRelaunchApp,
-          allowNotifications
+          allowNotifications,
+          kioskHomeButtonEnabled,
+          kioskHomeButtonPosition
         );
       } catch (error) {
         // Silent fail
@@ -1640,6 +1669,7 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
               setMotionEnabled(false);
               setScreensaverBrightness(0);
               setDefaultBrightness(0.5);
+              setMaxVolumePercent(100);
               setCertificates([]);
               setDisplayMode('webview');
               setExternalAppPackage('');
@@ -1815,6 +1845,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
             onManagedAppsChange={setManagedApps}
             externalAppMode={externalAppMode}
             onExternalAppModeChange={setExternalAppMode}
+            externalAppBackgroundColor={externalAppBackgroundColor}
+            onExternalAppBackgroundColorChange={setExternalAppBackgroundColor}
             hasOverlayPermission={hasOverlayPermission}
             onRequestOverlayPermission={requestOverlayPermission}
             hasUsageStatsPermission={hasUsageStatsPermission}
@@ -1944,6 +1976,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
             onBrightnessManagementEnabledChange={handleBrightnessManagementToggle}
             defaultBrightness={defaultBrightness}
             onDefaultBrightnessChange={setDefaultBrightness}
+            maxVolumePercent={maxVolumePercent}
+            onMaxVolumePercentChange={setMaxVolumePercent}
             autoBrightnessEnabled={autoBrightnessEnabled}
             onAutoBrightnessEnabledChange={handleAutoBrightnessToggle}
             autoBrightnessMin={autoBrightnessMin}
@@ -2064,6 +2098,10 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
             onReturnTapTimeoutChange={setReturnTapTimeout}
             returnButtonPosition={returnButtonPosition}
             onReturnButtonPositionChange={setReturnButtonPosition}
+            kioskHomeButtonEnabled={kioskHomeButtonEnabled}
+            onKioskHomeButtonEnabledChange={setKioskHomeButtonEnabled}
+            kioskHomeButtonPosition={kioskHomeButtonPosition}
+            onKioskHomeButtonPositionChange={setKioskHomeButtonPosition}
             overlayButtonVisible={overlayButtonVisible}
             onOverlayButtonVisibleChange={handleOverlayButtonVisibleChange}
             volumeUp5TapEnabled={volumeUp5TapEnabled}

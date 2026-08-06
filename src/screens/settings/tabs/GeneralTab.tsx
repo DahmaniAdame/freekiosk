@@ -44,6 +44,8 @@ interface GeneralTabProps {
   // External app sub-mode (single vs multi)
   externalAppMode: 'single' | 'multi';
   onExternalAppModeChange: (mode: 'single' | 'multi') => void;
+  externalAppBackgroundColor: string;
+  onExternalAppBackgroundColorChange: (color: string) => void;
   
   // Managed apps (multi-app mode)
   managedApps: ManagedApp[];
@@ -170,6 +172,8 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
   loadingApps,
   externalAppMode,
   onExternalAppModeChange,
+  externalAppBackgroundColor,
+  onExternalAppBackgroundColorChange,
   managedApps,
   onManagedAppsChange,
   hasOverlayPermission,
@@ -702,6 +706,20 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
                 : 'Display a home screen grid with multiple apps'}
             />
           </SettingsSection>
+
+          <SettingsSection title="Appearance" icon="monitor">
+            <SettingsInput
+              label="Kiosk Background Color"
+              value={externalAppBackgroundColor}
+              onChangeText={onExternalAppBackgroundColorChange}
+              placeholder="#333"
+              maxLength={7}
+              error={externalAppBackgroundColor.length > 0 && !/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(externalAppBackgroundColor.trim())
+                ? 'Use a 3- or 6-digit hex color, such as #333 or #333333'
+                : undefined}
+              hint="Background of the multi-app home screen and external-app return screen"
+            />
+          </SettingsSection>
           
           {/* Single App: classic package name + picker */}
           {externalAppMode === 'single' && (
@@ -731,7 +749,7 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
               <SettingsInfoBox variant="info">
                 <Text style={styles.infoText}>
                   {'📱 Add apps to display on the home screen grid.\n'}
-                  {'Users can choose which app to launch.\n\n'}
+                  {'Apps are centered automatically and sorted alphabetically, with up to six per row. Kiosk users cannot rearrange them.\n\n'}
                   {'Toggle options per app: show on home screen, launch on boot, keep alive, accessibility.'}
                 </Text>
               </SettingsInfoBox>
@@ -797,8 +815,8 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
                 </Text>
                 <Text style={styles.permissionHint}>
                   {hasUsageStatsPermission
-                    ? "Auto-relaunch monitoring is active. FreeKiosk can detect when the external app closes."
-                    : "Required for auto-relaunch. Without this, FreeKiosk cannot detect when the external app closes or crashes."}
+                    ? "Foreground protection is active. FreeKiosk can restore the active kiosk app if Settings or another app appears."
+                    : "Required for strict foreground protection and auto-relaunch. Without it, some vendor Settings screens may remain visible."}
                 </Text>
               </View>
             </View>

@@ -147,7 +147,8 @@ class AudioControlModule(private val reactContext: ReactApplicationContext) :
         try {
             val am = audioManager()
             val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            val target = (percent.coerceIn(0, 100) * max / 100)
+            val effectivePercent = VolumeLimitManager.clampRequestedPercent(reactContext, percent)
+            val target = (effectivePercent * max / 100)
             am.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 target,

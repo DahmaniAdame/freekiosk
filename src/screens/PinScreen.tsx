@@ -83,6 +83,8 @@ const PinScreen: React.FC<PinScreenProps> = ({ navigation }) => {
         const returnTapTimeout = await StorageService.getReturnTapTimeout();
         const returnMode = await StorageService.getReturnMode();
         const returnButtonPosition = await StorageService.getReturnButtonPosition();
+        const kioskHomeButtonEnabled = await StorageService.getKioskHomeButtonEnabled();
+        const kioskHomeButtonPosition = await StorageService.getKioskHomeButtonPosition();
         const autoRelaunch = await StorageService.getAutoRelaunchApp();
         
         // Start OverlayService BEFORE launching the external app
@@ -95,7 +97,9 @@ const PinScreen: React.FC<PinScreenProps> = ({ navigation }) => {
           returnButtonPosition,
           externalAppPackage,
           autoRelaunch,
-          nfcEnabled
+          nfcEnabled,
+          kioskHomeButtonEnabled,
+          kioskHomeButtonPosition
         );
         console.log('[PinScreen] OverlayService started with auto-relaunch monitoring');
         

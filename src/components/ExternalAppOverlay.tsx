@@ -11,6 +11,8 @@ interface ExternalAppOverlayProps {
   managedApps?: ManagedApp[];
   /** External app sub-mode: single (classic) or multi (grid) */
   externalAppMode?: 'single' | 'multi';
+  /** Background color for the external-app kiosk screens */
+  backgroundColor?: string;
   isAppLaunched: boolean;
   backButtonMode: string;
   /** Number of taps to return to settings (default 5) */
@@ -40,6 +42,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   externalAppPackage,
   managedApps = [],
   externalAppMode = 'single',
+  backgroundColor = '#333',
   isAppLaunched,
   backButtonMode,
   returnTapCount = 5,
@@ -61,12 +64,21 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   // Window dimensions must be reactive — `Dimensions.get('window')` is evaluated once
   // at module load, so tile widths captured in landscape stay wrong after rotation to portrait.
   const { width: windowWidth } = useWindowDimensions();
-  const APP_GRID_NUM_COLUMNS = 4;
+  const APP_GRID_MAX_COLUMNS = 6;
+  const APP_GRID_MIN_TILE_WIDTH = 88;
+  const APP_GRID_MAX_TILE_WIDTH = 128;
   const APP_GRID_HORIZONTAL_PADDING = 16;
-  const APP_GRID_GAP = 8;
-  const appTileWidth =
-    (windowWidth - APP_GRID_HORIZONTAL_PADDING * 2 - APP_GRID_GAP * (APP_GRID_NUM_COLUMNS - 1)) /
-    APP_GRID_NUM_COLUMNS;
+  const APP_GRID_GAP = 12;
+  const maxColumnsForWidth = Math.max(
+    1,
+    Math.min(
+      APP_GRID_MAX_COLUMNS,
+      Math.floor(
+        (windowWidth - APP_GRID_HORIZONTAL_PADDING * 2 + APP_GRID_GAP) /
+        (APP_GRID_MIN_TILE_WIDTH + APP_GRID_GAP),
+      ),
+    ),
+  );
 
   const [appLabels, setAppLabels] = useState<Record<string, string>>({});
   const [appIcons, setAppIcons] = useState<Record<string, string>>({});
@@ -145,9 +157,31 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
     }
   }, [returnButtonPosition]);
   
-  // Only show multi-app grid when explicitly in multi mode
-  const homeScreenApps = externalAppMode === 'multi' ? managedApps.filter(app => app.showOnHomeScreen) : [];
+  // Only show multi-app grid when explicitly in multi mode.
+  const homeScreenApps = useMemo(
+    () => externalAppMode === 'multi'
+      ? managedApps.filter(app => app.showOnHomeScreen)
+      : [],
+    [externalAppMode, managedApps],
+  );
   const isMultiAppMode = externalAppMode === 'multi' && homeScreenApps.length > 0;
+  const appGridNumColumns = Math.max(
+    1,
+    Math.min(maxColumnsForWidth, homeScreenApps.length || 1),
+  );
+  const appGridAvailableWidth =
+    windowWidth -
+    APP_GRID_HORIZONTAL_PADDING * 2 -
+    APP_GRID_GAP * (appGridNumColumns - 1);
+  const appTileWidth = Math.min(
+    APP_GRID_MAX_TILE_WIDTH,
+    Math.max(APP_GRID_MIN_TILE_WIDTH, appGridAvailableWidth / appGridNumColumns),
+  );
+
+  const homeScreenAppPackagesKey = homeScreenApps
+    .map(app => app.packageName)
+    .sort()
+    .join('|');
   
   // Resolve app labels and icons for display
   useEffect(() => {
@@ -175,7 +209,19 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
       setAppIcons(icons);
     };
     resolveLabelsAndIcons();
-  }, [homeScreenApps.length, externalAppPackage]);
+  }, [homeScreenAppPackagesKey, externalAppPackage, isMultiAppMode]);
+
+  const sortedHomeScreenApps = useMemo(() => {
+    const appName = (app: ManagedApp) =>
+      appLabels[app.packageName] || app.displayName || app.packageName;
+
+    return [...homeScreenApps].sort((firstApp, secondApp) =>
+      appName(firstApp).localeCompare(appName(secondApp), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      }),
+    );
+  }, [appLabels, homeScreenApps]);
 
   const handleAppPress = (packageName: string) => {
     if (onLaunchApp) {
@@ -212,15 +258,12 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
     );
   };
 
-  // Multi-app mode: app is currently running — show empty view (Android shows the app)
-  if (isMultiAppMode && isAppLaunched) {
-    return <View style={styles.container} />;
-  }
-
-  // Multi-app mode: show app grid (home screen)
-  if (isMultiAppMode && !isAppLaunched) {
+  // Keep the kiosk home rendered behind the external task. Android places the
+  // selected app above this activity; if a vendor build refuses the launch, the
+  // user sees the app grid instead of a blank background.
+  if (isMultiAppMode) {
     return (
-      <View style={styles.container} onTouchStart={handleGridTouch}>
+      <View style={[styles.container, { backgroundColor }]} onTouchStart={handleGridTouch}>
         {showStatusBar && (
           <StatusBar
             showBattery={showBattery}
@@ -240,12 +283,15 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
           <Text style={styles.multiAppTitle}>FreeKiosk</Text>
         </View>
         <FlatList
-          data={homeScreenApps}
+          key={`app-grid-${appGridNumColumns}`}
+          data={sortedHomeScreenApps}
           renderItem={renderAppIcon}
           keyExtractor={item => item.packageName}
-          numColumns={APP_GRID_NUM_COLUMNS}
+          numColumns={appGridNumColumns}
+          style={styles.appGridList}
           contentContainerStyle={styles.appGrid}
-          columnWrapperStyle={styles.appGridRow}
+          columnWrapperStyle={appGridNumColumns > 1 ? styles.appGridRow : undefined}
+          showsVerticalScrollIndicator={false}
         />
         
         {/* Test mode warning */}
@@ -278,7 +324,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
 
   // Single-app mode or app is running: show original overlay
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor }]}>
       {showStatusBar && (
         <StatusBar
           showBattery={showBattery}
@@ -375,7 +421,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0066cc',
+    backgroundColor: '#333',
   },
   scrollContent: {
     flexGrow: 1,
@@ -528,31 +574,43 @@ const styles = StyleSheet.create({
   },
   // Multi-app home screen styles
   multiAppHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    zIndex: -1,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 12,
     gap: 10,
+    opacity: 0,
   },
   miniLogo: {
     width: 32,
     height: 32,
+    opacity: 0,
   },
   multiAppTitle: {
     fontSize: 20,
     fontWeight: 'bold',
     color: '#fff',
   },
+  appGridList: {
+    flex: 1,
+  },
   appGrid: {
+    flexGrow: 1,
+    justifyContent: 'center',
     paddingHorizontal: 16,
-    paddingTop: 20,
+    paddingVertical: 24,
+    gap: 20,
   },
   appGridRow: {
-    justifyContent: 'flex-start',
-    gap: 8,
-    marginBottom: 16,
+    justifyContent: 'center',
+    gap: 12,
   },
   appIconContainer: {
+    alignSelf: 'center',
     alignItems: 'center',
     paddingVertical: 8,
   },

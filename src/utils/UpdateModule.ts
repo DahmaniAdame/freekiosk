@@ -1,4 +1,5 @@
 import { NativeModules } from 'react-native';
+import { flushSettingsSnapshot } from './SettingsHistoryService';
 
 const { UpdateModule } = NativeModules;
 
@@ -82,10 +83,11 @@ export default {
    * @param downloadUrl - Direct download URL for the APK
    * @param version - Version string for display
    */
-  downloadAndInstall(downloadUrl: string, version: string): Promise<boolean> {
+  async downloadAndInstall(downloadUrl: string, version: string): Promise<boolean> {
     if (!ENABLE_SELF_UPDATE) {
       return Promise.reject(new Error('Self-update disabled in Play Store builds'));
     }
+    await flushSettingsSnapshot('before app update');
     return UpdateModule.downloadAndInstall(downloadUrl, version);
   },
 };

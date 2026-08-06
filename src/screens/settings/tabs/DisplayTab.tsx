@@ -29,6 +29,10 @@ interface DisplayTabProps {
   // Default brightness
   defaultBrightness: number;
   onDefaultBrightnessChange: (value: number) => void;
+
+  // Maximum media volume while kiosk lock task is active
+  maxVolumePercent: number;
+  onMaxVolumePercentChange: (value: number) => void;
   
   // Auto-brightness
   autoBrightnessEnabled: boolean;
@@ -138,6 +142,8 @@ const DisplayTab: React.FC<DisplayTabProps> = ({
   onBrightnessManagementEnabledChange,
   defaultBrightness,
   onDefaultBrightnessChange,
+  maxVolumePercent,
+  onMaxVolumePercentChange,
   autoBrightnessEnabled,
   onAutoBrightnessEnabledChange,
   autoBrightnessMin,
@@ -240,6 +246,25 @@ const DisplayTab: React.FC<DisplayTabProps> = ({
 
   return (
     <View>
+      <SettingsSection title="Volume Limit" icon="volume-high">
+        <SettingsSlider
+          label="Maximum Media Volume"
+          hint="While Lock Mode is active, hardware buttons and remote controls cannot raise media volume above this limit"
+          value={maxVolumePercent}
+          onValueChange={onMaxVolumePercentChange}
+          minimumValue={0}
+          maximumValue={100}
+          step={5}
+          formatValue={(value) => value >= 100 ? '100% (No limit)' : `${Math.round(value)}%`}
+          presets={[
+            { label: '25%', value: 25 },
+            { label: '50%', value: 50 },
+            { label: '75%', value: 75 },
+            { label: 'No limit', value: 100 },
+          ]}
+        />
+      </SettingsSection>
+
       {/* App Brightness Control toggle - WebView mode only (external app mode doesn't manage brightness) */}
       {displayMode !== 'external_app' && (
         <SettingsSection title="Brightness Control" icon="brightness-6">

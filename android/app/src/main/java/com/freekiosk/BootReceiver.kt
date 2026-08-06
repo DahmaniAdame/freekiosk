@@ -351,6 +351,10 @@ class BootReceiver : BroadcastReceiver() {
      * They are launched in the background (not brought to foreground).
      */
     private fun launchBackgroundApps(context: Context) {
+        if (isKioskEnabled(context)) {
+            DebugLog.d("BootReceiver", "Skipping launch-on-boot apps in kiosk mode")
+            return
+        }
         try {
             val apps = getManagedAppsForBoot(context)
             if (apps.isEmpty()) {
@@ -395,6 +399,10 @@ class BootReceiver : BroadcastReceiver() {
      * Start the BackgroundAppMonitorService if any managed app has keepAlive=true.
      */
     private fun startBackgroundMonitorIfNeeded(context: Context) {
+        if (isKioskEnabled(context)) {
+            DebugLog.d("BootReceiver", "Skipping visible keep-alive monitor in kiosk mode")
+            return
+        }
         try {
             val keepAliveApps = getManagedAppsForKeepAlive(context)
             if (keepAliveApps.isEmpty()) {

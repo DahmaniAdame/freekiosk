@@ -111,9 +111,11 @@ class BootLockActivity : Activity() {
 
             val admin = ComponentName(this, DeviceAdminReceiver::class.java)
 
-            // Build whitelist identical to MainActivity's: FreeKiosk + external app + managed apps
+            // Build the strict child-facing allowlist before React Native starts.
             val whitelist = mutableListOf(packageName)
-            whitelist.addAll(readManagedAppPackages())
+            if (isMultiExternalAppMode()) {
+                whitelist.addAll(readManagedAppPackages())
+            }
             readExternalAppPackage()?.let { whitelist.add(it) }
             val unique = whitelist.distinct().toTypedArray()
 
@@ -145,9 +147,13 @@ class BootLockActivity : Activity() {
                     // Android requires HOME when NOTIFICATIONS is enabled.
                     features = features or DevicePolicyManager.LOCK_TASK_FEATURE_HOME
                 }
+                // Enter the same strict child-facing policy during boot, before an
+                // allowed app can expose any system surface.
+                features = DevicePolicyManager.LOCK_TASK_FEATURE_NONE
                 dpm.setLockTaskFeatures(admin, features)
                 DebugLog.d(TAG, "Lock-task features at boot: blockPowerButton=${!allowPowerButton}, notifications=$allowNotifications, systemInfo=$allowSystemInfo (flags=$features)")
             }
+            dpm.setStatusBarDisabled(admin, true)
 
             startLockTask()
             DebugLog.d(TAG, "Lock-task started with whitelist: ${unique.toList()}")
@@ -161,8 +167,9 @@ class BootLockActivity : Activity() {
     // ────────────────────────────────────────────────────────────────────
 
     private fun launchMainActivity() {
-        // Launch managed apps with launchOnBoot=true in the background first
-        launchBackgroundBootApps()
+        // Managed apps are never started here: launching an Activity is visible and
+        // could surface above the child-facing kiosk before the active app is chosen.
+        KioskForegroundGuard.clearActiveKioskPackage(this)
 
         try {
             val intent = Intent(this, MainActivity::class.java).apply {
@@ -293,7 +300,14 @@ class BootLockActivity : Activity() {
         return try {
             val json = readAsyncStorageValue("@kiosk_managed_apps", "[]")
             val arr = org.json.JSONArray(json)
-            (0 until arr.length()).map { arr.getJSONObject(it).getString("packageName") }
+            (0 until arr.length()).mapNotNull {
+                val app = arr.getJSONObject(it)
+                if (app.optBoolean("showOnHomeScreen", false)) {
+                    app.optString("packageName").takeIf(String::isNotBlank)
+                } else {
+                    null
+                }
+            }
         } catch (e: Exception) {
             emptyList()
         }
@@ -302,8 +316,16 @@ class BootLockActivity : Activity() {
     private fun readExternalAppPackage(): String? {
         val mode = readAsyncStorageValue("@kiosk_display_mode", "webview")
         if (mode != "external_app") return null
+        val externalMode = readAsyncStorageValue("@kiosk_external_app_mode", "single")
+        if (externalMode != "single") return null
         val pkg = readAsyncStorageValue("@kiosk_external_app_package", "")
         return pkg.ifEmpty { null }
+    }
+
+    private fun isMultiExternalAppMode(): Boolean {
+        val displayMode = readAsyncStorageValue("@kiosk_display_mode", "webview")
+        val externalMode = readAsyncStorageValue("@kiosk_external_app_mode", "single")
+        return displayMode == "external_app" && externalMode == "multi"
     }
 
     // ────────────────────────────────────────────────────────────────────

@@ -388,6 +388,25 @@ class UpdateModule(reactContext: ReactApplicationContext) : ReactContextBaseJava
     }
 
     private fun installApk(uri: Uri) {
+        // Recovery staging is mandatory. Do not start an update that could leave
+        // the kiosk without its last known configuration.
+        run {
+            val currentInfo = reactApplicationContext.packageManager.getPackageInfo(
+                reactApplicationContext.packageName,
+                0
+            )
+            val currentVersionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                currentInfo.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                currentInfo.versionCode.toLong()
+            }
+            SettingsHistoryStore.stageLatestForUpdate(
+                reactApplicationContext,
+                currentVersionCode + 1,
+            )
+        }
+
         try {
             // Try silent install if in Device Owner mode
             val dpm = reactApplicationContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
