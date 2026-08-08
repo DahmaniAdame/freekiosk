@@ -42,6 +42,7 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                     packageName
                 )
                 KioskSystemUiPolicy.enable(reactApplicationContext)
+                WafKioskChromePolicy.enforceForKiosk(reactApplicationContext)
 
                 // Device Owner: always add the selected app to the lock-task allowlist
                 // before launch. Do this even while lock task is still entering; gating it

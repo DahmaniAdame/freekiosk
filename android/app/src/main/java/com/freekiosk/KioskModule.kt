@@ -79,7 +79,7 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
         try {
             val activity = reactApplicationContext.currentActivity
             if (activity is MainActivity) {
-                activity.kioskScreenActive = active
+                activity.setKioskScreenActive(active)
             }
             promise.resolve(true)
         } catch (e: Exception) {
@@ -395,6 +395,7 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         } else {
                             if (isSingleExternalAppMode() || isMultiExternalAppMode()) {
                                 KioskSystemUiPolicy.enable(reactApplicationContext)
+                                WafKioskChromePolicy.enforceForKiosk(reactApplicationContext)
                                 android.util.Log.d("KioskModule", "External app mode without Device Owner: screen pinning skipped")
                             } else {
                                 activity.startLockTask()

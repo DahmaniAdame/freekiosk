@@ -27,6 +27,7 @@ import android.os.Build
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import android.Manifest
 import androidx.core.app.ActivityCompat
@@ -456,7 +457,13 @@ class MainActivity : ReactActivity() {
     if (!devicePolicyManager.isDeviceOwnerApp(packageName)) return
 
     try {
-      KioskSystemUiPolicy.enable(this)
+      val childFacing = isChildFacingKioskRoute()
+      if (childFacing) {
+        KioskSystemUiPolicy.enable(this)
+      } else {
+        KioskSystemUiPolicy.restore(this)
+      }
+      WafKioskChromePolicy.setChildFacingActive(this, childFacing)
       applyDefaultLauncherPolicy()
 
       // Read settings from AsyncStorage v2 database
@@ -558,7 +565,6 @@ class MainActivity : ReactActivity() {
       )
       
       devicePolicyManager.setPackagesSuspended(adminComponent, samsungUpdateApps, true)
-      WafSideMenuPolicy.hideForKiosk(this, devicePolicyManager, adminComponent)
       
       val policy = android.app.admin.SystemUpdatePolicy.createPostponeInstallPolicy()
       devicePolicyManager.setSystemUpdatePolicy(adminComponent, policy)
@@ -615,7 +621,7 @@ class MainActivity : ReactActivity() {
       )
       
       devicePolicyManager.setPackagesSuspended(adminComponent, samsungUpdateApps, false)
-      WafSideMenuPolicy.restoreAfterKiosk(this, devicePolicyManager, adminComponent)
+      WafKioskChromePolicy.restoreForAdmin(this)
       devicePolicyManager.setSystemUpdatePolicy(adminComponent, null)
       KioskSystemUiPolicy.restore(this)
       showSystemUI()
@@ -894,7 +900,11 @@ class MainActivity : ReactActivity() {
   }
 
   private fun hideSystemUI() {
-    if (!isKioskEnabled()) {
+    val childFacing = isChildFacingKioskRoute()
+    WindowCompat.setDecorFitsSystemWindows(window, !childFacing)
+    WafKioskChromePolicy.setChildFacingActive(this, childFacing)
+    if (!childFacing) {
+      KioskSystemUiPolicy.restore(this)
       showSystemUI()
       return
     }
@@ -1045,6 +1055,16 @@ class MainActivity : ReactActivity() {
   // Settings would also fire navigateToPin and kick the user out. Defaults false
   // (fail-safe: no false positives if the focus signal never arrives).
   @Volatile var kioskScreenActive = false
+  @Volatile private var kioskRouteStateKnown = false
+
+  internal fun setKioskScreenActive(active: Boolean) {
+    kioskScreenActive = active
+    kioskRouteStateKnown = true
+    runOnUiThread { hideSystemUI() }
+  }
+
+  private fun isChildFacingKioskRoute(): Boolean =
+    !kioskRouteStateKnown || kioskScreenActive
 
   private var tapSettingsCount = 0
   private var tapSettingsFirstTapTime = 0L

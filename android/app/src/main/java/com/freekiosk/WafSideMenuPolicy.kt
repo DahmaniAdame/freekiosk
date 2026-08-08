@@ -11,7 +11,7 @@ import android.provider.Settings
 import android.util.Log
 
 /**
- * Lifecycle-scoped control of Samsung WAF's signed side-menu service.
+ * Child-facing lifecycle control of Samsung WAF's signed side-menu service.
  *
  * The handles are TYPE_SYSTEM_ALERT windows owned by com.xbh.navisetting, so FreeKiosk's
  * TYPE_APPLICATION_OVERLAY touch regions are always below them and cannot consume their taps.
@@ -54,16 +54,23 @@ object WafSideMenuPolicy {
         if (!isWafSideMenuAvailable(context)) return false
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(SIDE_MENU_DISABLED_BY_KIOSK_KEY, false)) {
+        val wasAlreadyDisabled = prefs.getBoolean(SIDE_MENU_DISABLED_BY_KIOSK_KEY, false)
+        if (!wasAlreadyDisabled) {
             val resolver = context.contentResolver
+            val currentShow = Settings.Global.getString(resolver, NAVI_SHOW_SETTING)
+            val currentEnable = Settings.Global.getString(resolver, NAVI_ENABLE_SETTING)
+            // Recover an in-place upgrade from older builds that could leave both values at
+            // FreeKiosk's exact disabled state without retaining the lifecycle marker. The
+            // verified WAF defaults are an unset SHOW value and an enabled persistent service.
+            val staleKioskState = currentShow == "0" && currentEnable == "0"
             val saved = prefs.edit()
                 .putString(
                     ORIGINAL_SHOW_SETTING_KEY,
-                    Settings.Global.getString(resolver, NAVI_SHOW_SETTING) ?: UNSET_SETTING,
+                    if (staleKioskState) UNSET_SETTING else currentShow ?: UNSET_SETTING,
                 )
                 .putString(
                     ORIGINAL_ENABLE_SETTING_KEY,
-                    Settings.Global.getString(resolver, NAVI_ENABLE_SETTING) ?: UNSET_SETTING,
+                    if (staleKioskState) "1" else currentEnable ?: UNSET_SETTING,
                 )
                 .putBoolean(SIDE_MENU_DISABLED_BY_KIOSK_KEY, true)
                 .commit()
@@ -71,14 +78,18 @@ object WafSideMenuPolicy {
         }
 
         val resolver = context.contentResolver
-        val showSettingDisabled = Settings.Global.putString(resolver, NAVI_SHOW_SETTING, "0")
-        val enableSettingDisabled = Settings.Global.putString(resolver, NAVI_ENABLE_SETTING, "0")
+        val showWasDisabled = Settings.Global.getString(resolver, NAVI_SHOW_SETTING) == "0"
+        val enableWasDisabled = Settings.Global.getString(resolver, NAVI_ENABLE_SETTING) == "0"
+        val showSettingDisabled = showWasDisabled ||
+            Settings.Global.putString(resolver, NAVI_SHOW_SETTING, "0")
+        val enableSettingDisabled = enableWasDisabled ||
+            Settings.Global.putString(resolver, NAVI_ENABLE_SETTING, "0")
         val hiddenImmediately = requestVisibility(context, show = false)
 
         if (!showSettingDisabled || !enableSettingDisabled) {
             Log.w(TAG, "Could not persist every WAF side-menu setting; controller result=$hiddenImmediately")
-        } else {
-            Log.d(TAG, "Samsung WAF side menus disabled for Lock Mode")
+        } else if (!wasAlreadyDisabled || !showWasDisabled || !enableWasDisabled) {
+            Log.d(TAG, "Samsung WAF side menus disabled for child-facing kiosk UI")
         }
         return showSettingDisabled || enableSettingDisabled || hiddenImmediately
     }
@@ -125,7 +136,7 @@ object WafSideMenuPolicy {
                     .remove(ORIGINAL_ENABLE_SETTING_KEY)
                     .commit()
             ) { "Could not clear remembered WAF side-menu state" }
-            Log.d(TAG, "Samsung WAF side menus restored after Lock Mode")
+            Log.d(TAG, "Samsung WAF side menus restored for admin UI or kiosk exit")
         } else {
             Log.w(TAG, "WAF side-menu settings could not be fully restored")
         }
@@ -187,7 +198,7 @@ object WafSideMenuPolicy {
                 check(prefs.edit().remove(stateKey).commit()) {
                     "Could not clear remembered $label state"
                 }
-                Log.d(TAG, "$label restored after Lock Mode")
+                Log.d(TAG, "$label restored for admin UI or kiosk exit")
                 true
             } else {
                 false

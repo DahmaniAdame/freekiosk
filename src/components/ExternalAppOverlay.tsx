@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, ScrollView, FlatList, useWindowDimensions } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Image, ScrollView, FlatList, useWindowDimensions, Dimensions } from 'react-native';
 import StatusBar from './StatusBar';
 import AppLauncherModule, { AppInfo } from '../utils/AppLauncherModule';
 import { ManagedApp } from '../types/managedApps';
@@ -76,6 +76,12 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   // Window dimensions must be reactive — `Dimensions.get('window')` is evaluated once
   // at module load, so tile widths captured in landscape stay wrong after rotation to portrait.
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  // Android's window metrics can continue excluding a hidden navigation inset even when the
+  // activity surface is edge-to-edge. Use the physical screen extent for the wallpaper so the
+  // hidden bottom bar cannot leave a bar-shaped strip of fallback background behind it.
+  const screenDimensions = Dimensions.get('screen');
+  const wallpaperViewportWidth = Math.max(windowWidth, screenDimensions.width);
+  const wallpaperViewportHeight = Math.max(windowHeight, screenDimensions.height);
   const APP_GRID_MAX_COLUMNS = 6;
   const APP_GRID_MIN_TILE_WIDTH = 88;
   const APP_GRID_MAX_TILE_WIDTH = 128;
@@ -116,7 +122,10 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
 
   const wallpaperLayout = useMemo(() => {
     if (wallpaperSize.width <= 0 || wallpaperSize.height <= 0) return null;
-    const scale = Math.max(windowWidth / wallpaperSize.width, windowHeight / wallpaperSize.height);
+    const scale = Math.max(
+      wallpaperViewportWidth / wallpaperSize.width,
+      wallpaperViewportHeight / wallpaperSize.height,
+    );
     const width = wallpaperSize.width * scale;
     const height = wallpaperSize.height * scale;
     const [vertical, horizontal] = backgroundImagePosition.split('-');
@@ -125,10 +134,15 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
     return {
       width,
       height,
-      left: (windowWidth - width) * horizontalRatio,
-      top: (windowHeight - height) * verticalRatio,
+      left: (wallpaperViewportWidth - width) * horizontalRatio,
+      top: (wallpaperViewportHeight - height) * verticalRatio,
     };
-  }, [backgroundImagePosition, wallpaperSize, windowHeight, windowWidth]);
+  }, [
+    backgroundImagePosition,
+    wallpaperSize,
+    wallpaperViewportHeight,
+    wallpaperViewportWidth,
+  ]);
 
   const renderWallpaper = () => {
     if (!backgroundImageEnabled || wallpaperFailed || !wallpaperLayout) return null;

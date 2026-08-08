@@ -110,6 +110,8 @@ object KioskExitManager {
             .onFailure { warnings.addWarning("clear foreground guard", it) }
         runCatching { KioskSystemUiPolicy.restore(context) }
             .onFailure { warnings.addWarning("restore system UI", it) }
+        runCatching { WafKioskChromePolicy.restoreForAdmin(context) }
+            .onFailure { warnings.addWarning("restore Samsung WAF chrome", it) }
 
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
         val admin = ComponentName(context, DeviceAdminReceiver::class.java)
@@ -164,8 +166,6 @@ object KioskExitManager {
             runCatching {
                 policyManager.setPackagesSuspended(admin, SAMSUNG_UPDATE_PACKAGES, false)
             }.onFailure { warnings.addWarning("resume Samsung update packages", it) }
-            runCatching { WafSideMenuPolicy.restoreAfterKiosk(context, policyManager, admin) }
-                .onFailure { warnings.addWarning("restore Samsung WAF side menus", it) }
             runCatching { policyManager.setSystemUpdatePolicy(admin, null) }
                 .onFailure { warnings.addWarning("restore system-update policy", it) }
         }

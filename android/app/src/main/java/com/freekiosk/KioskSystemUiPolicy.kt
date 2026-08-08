@@ -6,10 +6,10 @@ import android.content.pm.PackageManager
 import android.provider.Settings
 
 /**
- * Applies an OEM-compatible full-system immersive policy while kiosk mode is active.
+ * Applies an OEM-compatible full-system immersive policy while child-facing UI is active.
  * MainActivity can hide its own bars with WindowInsets, but external apps own their
  * windows. The global policy is therefore used only when WRITE_SECURE_SETTINGS was
- * provisioned on the kiosk device, and the previous value is restored on admin exit.
+ * provisioned on the kiosk device, and the previous value is restored in admin UI or on exit.
  */
 object KioskSystemUiPolicy {
     private const val TAG = "KioskSystemUiPolicy"
@@ -24,11 +24,10 @@ object KioskSystemUiPolicy {
     private const val KIOSK_POLICY = "immersive.full=*"
 
     fun enable(context: Context): Boolean {
-        val wafTaskbarSuppressed = WafTaskbarPolicy.hideForKiosk(context)
         if (context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) !=
             PackageManager.PERMISSION_GRANTED) {
             DebugLog.d(TAG, "WRITE_SECURE_SETTINGS unavailable; relying on lock task for navigation UI")
-            return wafTaskbarSuppressed
+            return false
         }
 
         return try {
@@ -39,13 +38,23 @@ object KioskSystemUiPolicy {
                     context.contentResolver,
                     HEADS_UP_NOTIFICATIONS
                 )
-                prefs.edit()
+                // Recover an in-place upgrade from an older rapid route transition that
+                // could clear the lifecycle marker after reapplying FreeKiosk's exact pair.
+                val staleKioskState = previous == KIOSK_POLICY && previousHeadsUp == "0"
+                val saved = prefs.edit()
                     .putBoolean(KEY_APPLIED, true)
-                    .putBoolean(KEY_HAD_PREVIOUS, previous != null)
-                    .putString(KEY_PREVIOUS, previous.orEmpty())
-                    .putBoolean(KEY_HAD_PREVIOUS_HEADS_UP, previousHeadsUp != null)
-                    .putString(KEY_PREVIOUS_HEADS_UP, previousHeadsUp.orEmpty())
-                    .apply()
+                    .putBoolean(KEY_HAD_PREVIOUS, previous != null && !staleKioskState)
+                    .putString(KEY_PREVIOUS, previous.takeUnless { staleKioskState }.orEmpty())
+                    .putBoolean(
+                        KEY_HAD_PREVIOUS_HEADS_UP,
+                        previousHeadsUp != null && !staleKioskState,
+                    )
+                    .putString(
+                        KEY_PREVIOUS_HEADS_UP,
+                        previousHeadsUp.takeUnless { staleKioskState }.orEmpty(),
+                    )
+                    .commit()
+                check(saved) { "Could not remember the previous system UI policy" }
             }
             Settings.Global.putString(context.contentResolver, POLICY_CONTROL, KIOSK_POLICY)
             Settings.Global.putInt(context.contentResolver, HEADS_UP_NOTIFICATIONS, 0)
@@ -53,16 +62,13 @@ object KioskSystemUiPolicy {
             true
         } catch (e: Exception) {
             DebugLog.d(TAG, "Could not enable global navigation immersive policy: ${e.message}")
-            wafTaskbarSuppressed
+            false
         }
     }
 
     fun restore(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_APPLIED, false)) {
-            WafTaskbarPolicy.restoreAfterKiosk(context)
-            return
-        }
+        if (!prefs.getBoolean(KEY_APPLIED, false)) return
 
         try {
             if (prefs.getBoolean(KEY_HAD_PREVIOUS, false)) {
@@ -87,8 +93,9 @@ object KioskSystemUiPolicy {
         } catch (e: Exception) {
             DebugLog.d(TAG, "Could not restore global navigation policy: ${e.message}")
         } finally {
-            prefs.edit().clear().apply()
-            WafTaskbarPolicy.restoreAfterKiosk(context)
+            check(prefs.edit().clear().commit()) {
+                "Could not clear the remembered system UI policy"
+            }
         }
     }
 }

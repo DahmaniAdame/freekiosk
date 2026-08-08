@@ -8,7 +8,7 @@
 - Upstream: `https://github.com/RushB-fr/freekiosk.git`
 - Android package: `com.freekiosk`
 - Device Admin component: `com.freekiosk/.DeviceAdminReceiver`
-- Current source version: `1.2.34` (`versionCode 58`)
+- Current source version: `1.2.38` (`versionCode 62`)
 
 Preserve the current implementation. Before changing anything, inspect `git status`
 and the latest commit. Do not reset, clean, check out, or overwrite user work.
@@ -17,6 +17,9 @@ and the latest commit. Do not reset, clean, check out, or overwrite user work.
 
 The APK files are intentionally ignored by Git. The current WAF artifact is:
 
+- `FreeKiosk-v1.2.38-arm64.apk`
+  - SHA-256: `79d3538b6619803df949a391b3f4ac3f74d9e5713a98f8c0eabd516afddc863f`
+  - 24,872,234 bytes; ARM64-only release, built, installed, and route-lifecycle-tested on the WAF display.
 - `FreeKiosk-v1.2.34-arm64.apk`
   - SHA-256: `26ba2152e17644b758b10e292df489521255207e8b6450c2c4719ccbce8acfa5`
   - 24,872,170 bytes; ARM64-only release, built, installed, and lifecycle-tested on the WAF display.
@@ -94,7 +97,7 @@ space; they are generated again by Gradle.
 - Display IP: `192.168.0.37`
 - Model: Samsung WAF interactive display, Android 14 / API 34, ARM64.
 - Only Android user `0` exists.
-- FreeKiosk 1.2.34 is installed in place and remains the Device Owner.
+- FreeKiosk 1.2.38 is installed in place and remains the Device Owner.
 - The final verification deliberately exited Lock Mode through the emergency volume
   sequence. Lock task is `NONE`, `com.xbh.launcher` is focused, the saved restrictions
   are inactive, and both WAF side handles are restored. Re-enter Lock Mode from the
@@ -260,8 +263,9 @@ Diagnose the precise blocker before changing device state.
   hidden zero-visible-region surface under the existing immersive policy.
 - `WafTaskbarPolicy.kt` applies 577dpi only on devices exposing the Samsung WAF navigation
   controller, remembers the previous override, and restores it on kiosk exit. It is called by
-  `KioskSystemUiPolicy`, so every Lock Mode entry/reapply and every normal/emergency exit uses
-  the same lifecycle. The app SELinux domain cannot discover WindowManagerService through the
+  the coordinated WAF chrome policy, so every child-facing route/reapply and every
+  normal/emergency exit uses the same lifecycle. The app SELinux domain cannot discover
+  WindowManagerService through the
   `wm`/`cmd` clients, so the policy uses the already-authorized binder retained by Android's
   `WindowManagerImpl` and the verified Android 14 density transactions directly. The physical
   resolution remains 3840x2160.
@@ -276,6 +280,24 @@ Diagnose the precise blocker before changing device state.
   configuration restored 577dpi, Lock Task `LOCKED`, both OEM settings to `0`, and zero Taskbar
   or `com.xbh.navisetting` windows. A deliberate live change to 576dpi was self-healed back to
   577dpi by the in-app binder policy, proving the app—not ADB—owns the active restriction.
+
+## Coordinated WAF chrome lifecycle added in 1.2.38
+
+- `WafKioskChromePolicy.kt` owns the WAF side menus and bottom navigation/taskbar as one
+  child-facing policy. The kiosk grid and allowed external apps hide both; PIN and Settings
+  restore both, independently of whether Lock Mode itself is enabled.
+- A two-second native reconciliation loop reapplies both controls while the kiosk is
+  child-facing. Live fault injection passed: changing the density from 577dpi to 576dpi was
+  repaired to 577dpi, and changing both OEM side-menu settings to `1` was repaired to `0`.
+- Rapid route transitions now persist and clear the previous immersive/heads-up values
+  synchronously, avoiding a stale `immersive.full=*` value after entering admin UI.
+- The main window switches between edge-to-edge kiosk layout and fitted admin layout. The
+  external-app wallpaper uses the physical screen extent, so hiding the phone-profile
+  navigation surface leaves no bar-shaped fallback-color strip.
+- On-device lifecycle verification passed with Lock Mode off: the child-facing grid showed
+  no side handles, bottom controls, or residual bottom strip at 577dpi with both OEM settings
+  at `0`; the PIN route restored 480dpi, both side handles, the bottom gesture bar, OEM values
+  `null`/`1`, and cleared immersive/heads-up settings; **Back to Kiosk** hid both again.
 
 ## Verified on the SM-X800 tablet (historical)
 

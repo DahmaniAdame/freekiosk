@@ -54,6 +54,7 @@ class HomeActivity : AppCompatActivity() {
             !externalAppPackage.isNullOrEmpty() &&
             secureExternalLaunchAllowed) {
             KioskSystemUiPolicy.enable(this)
+            WafKioskChromePolicy.enforceForKiosk(this)
             KioskForegroundGuard.authorizeKioskLaunch(this, externalAppPackage)
             // Démarrer l'OverlayService avec le bouton de retour
             startOverlayService(tapCount, tapTimeout, returnMode, buttonPosition, kioskHomeButtonEnabled, kioskHomeButtonPosition)

@@ -10,7 +10,7 @@ import android.os.Process
 import android.util.Log
 
 /**
- * Removes the AOSP Launcher3 tablet taskbar while Lock Mode is active on Samsung WAF.
+ * Removes the AOSP Launcher3 tablet taskbar while child-facing UI is active on Samsung WAF.
  *
  * This firmware implements the bottom taskbar as a privileged NAVIGATION_BAR_PANEL window.
  * It remains above application overlays and ignores immersive policy. Launcher3 only creates
@@ -89,7 +89,7 @@ object WafTaskbarPolicy {
         val applied = commandSucceeded &&
             readDensityState(windowManager)?.override == TARGET_DENSITY
         if (applied) {
-            Log.d(TAG, "Samsung WAF Launcher3 taskbar suppressed for Lock Mode")
+            Log.d(TAG, "Samsung WAF Launcher3 taskbar suppressed for child-facing kiosk UI")
         } else {
             Log.w(TAG, "Could not suppress the WAF Launcher3 taskbar")
         }
@@ -127,7 +127,7 @@ object WafTaskbarPolicy {
                     .remove(KEY_ORIGINAL_OVERRIDE)
                     .commit()
             ) { "Could not clear remembered WAF density state" }
-            Log.d(TAG, "Previous WAF display density restored after Lock Mode")
+            Log.d(TAG, "Previous WAF display density restored for admin UI or kiosk exit")
         } else {
             Log.w(TAG, "Could not restore WAF display density")
         }
