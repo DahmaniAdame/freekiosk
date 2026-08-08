@@ -410,6 +410,61 @@ List available cameras on the device. **(v1.2.5+)**
 
 
 
+### Remote Settings
+
+#### `GET /api/settings`
+
+Returns the typed catalog of settings that may be managed remotely. Each item includes
+`key`, `label`, `category`, `type`, `isSet`, and, when set, `value`. The supported types are
+`boolean`, `number`, `string`, and `json`.
+
+PINs, the REST API key, MQTT passwords, HTTP Basic Auth passwords, and internal storage keys
+are deliberately excluded.
+
+```json
+{
+  "success": true,
+  "data": {
+    "settings": [
+      {
+        "key": "@kiosk_external_app_background_position",
+        "label": "External App Background Position",
+        "category": "External App",
+        "type": "string",
+        "isSet": true,
+        "value": "bottom-center"
+      }
+    ],
+    "secretSettingsExcluded": true,
+    "restartRequiredAfterWrite": true
+  }
+}
+```
+
+#### `POST /api/settings`
+
+Atomically sets and unsets allowlisted settings. Values must match the type reported by the
+catalog. A key cannot appear in both `set` and `unset` in the same request.
+
+```bash
+curl -X POST http://TABLET_IP:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: YOUR_API_KEY' \
+  -d '{
+    "set": {
+      "@kiosk_external_app_background_image_enabled": true,
+      "@kiosk_external_app_background_position": "bottom-center"
+    },
+    "unset": ["@kiosk_external_app_background_image"]
+  }'
+```
+
+Writes require REST control to be enabled and a non-empty valid API key. The response lists
+the updated and unset keys. `restartRequired` is true when anything changed; restart the
+FreeKiosk UI with `POST /api/restart-ui` to apply those changes. REST server or Lock Mode
+changes can move, stop, or restrict the endpoint after restart.
+
+
 ### Control Commands (POST)
 
 #### `POST /api/brightness`
@@ -446,9 +501,29 @@ Get current auto-brightness status.
     "enabled": true,
     "min": 10,
     "max": 100,
+    "offset": 10,
     "currentLightLevel": 250.5
   }
 }
+```
+
+#### `GET /api/motion`
+Get the current motion state and whether continuous motion detection is enabled.
+```json
+{
+  "success": true,
+  "data": {
+    "detected": false,
+    "alwaysOn": true
+  }
+}
+```
+
+#### `POST /api/motion/always-on`
+Enable or disable continuous camera-based motion detection, matching the UI/MQTT control.
+The setting is persisted across app restarts.
+```json
+{ "enabled": true }
 ```
 
 #### `GET|POST /api/screen/on`
@@ -597,6 +672,37 @@ Lock device screen. Uses `DevicePolicyManager.lockNow()` (Device Owner) or `GLOB
 
 #### `GET|POST /api/restart-ui`
 Restart the FreeKiosk app UI. Calls `activity.recreate()` to fully restart the React Native activity without rebooting the device. Useful for troubleshooting UI issues remotely.
+
+#### `POST /api/exit`
+Emergency kill switch that performs the same persistent exit as **Settings → Advanced → Exit
+Kiosk Mode**, then terminates the entire FreeKiosk process. Use it when an iteration leaves the
+kiosk UI, overlay, or watchdog in a state that cannot be recovered remotely.
+
+This endpoint:
+
+- saves Lock Mode and default-launcher mode as disabled;
+- clears the direct-boot flag and Device Owner HOME/lock-task policies;
+- restores the status/navigation UI and screen-capture policy;
+- stops the kiosk watchdog, external-app monitor, and overlay service;
+- removes all FreeKiosk tasks, opens the normal Android launcher, and kills the process.
+
+It deliberately **does not remove Device Owner ownership** or erase settings. FreeKiosk can still
+be opened manually and reconfigured later.
+
+For safety, all three conditions are required: REST control enabled, a non-empty API key, and an
+explicit JSON confirmation. A successful request returns `202 Accepted`; the API then becomes
+unreachable because FreeKiosk has exited.
+
+```bash
+curl -X POST http://TABLET_IP:8080/api/exit \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: YOUR_API_KEY' \
+  -d '{"confirm":true}'
+```
+
+`/api/kiosk/exit` and `/api/app/kill` are aliases with identical safeguards and behavior. `GET` is
+never accepted for these endpoints, preventing a browser prefetch or health probe from triggering
+an exit.
 
 
 ### Audio Control (POST)
@@ -1122,6 +1228,7 @@ curl http://TABLET_IP:8080/api/location
 Common errors:
 - `401 Unauthorized` - Invalid or missing API key
 - `403 Forbidden` - Control commands disabled
+- `405 Method Not Allowed` - A POST-only endpoint was called with GET
 - `404 Not Found` - Unknown endpoint
 - `500 Internal Error` - Server error
 

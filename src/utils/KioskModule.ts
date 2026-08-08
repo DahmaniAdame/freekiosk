@@ -2,6 +2,7 @@ import { NativeModules } from 'react-native';
 
 interface KioskModuleInterface {
   exitKioskMode(): Promise<boolean>;
+  prepareKioskEnable(): Promise<boolean>;
   startLockTask(externalAppPackage?: string | null, allowPowerButton?: boolean, allowNotifications?: boolean, allowSystemInfo?: boolean, allowEmergencyCall?: boolean): Promise<boolean>;
   stopLockTask(): Promise<boolean>;
   isInLockTaskMode(): Promise<boolean>;

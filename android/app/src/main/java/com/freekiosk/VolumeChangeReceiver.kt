@@ -37,12 +37,48 @@ class VolumeChangeReceiver : BroadcastReceiver() {
         if (intent.action == "android.media.VOLUME_CHANGED_ACTION") {
             try {
                 val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                val currentVolume = VolumeLimitManager.enforce(context, audioManager)
+                val eventStream = intent.getIntExtra(
+                    "android.media.EXTRA_VOLUME_STREAM_TYPE",
+                    AudioManager.STREAM_MUSIC,
+                )
+                val eventVolume = intent.getIntExtra(
+                    "android.media.EXTRA_VOLUME_STREAM_VALUE",
+                    -1,
+                )
+                val previousEventVolume = intent.getIntExtra(
+                    "android.media.EXTRA_PREV_VOLUME_STREAM_VALUE",
+                    -1,
+                )
+                val isMusicButtonChange = eventStream == AudioManager.STREAM_MUSIC &&
+                    eventVolume >= 0 && previousEventVolume >= 0 &&
+                    eventVolume != previousEventVolume
+
+                // Record the broadcast's own before/after values before applying volume limits.
+                // Samsung emits a corrective VOLUME_CHANGED_ACTION when a limit is enforced;
+                // enforcing first can therefore turn one DOWN press into a false UP observation.
+                val emergencyCompleted = if (isMusicButtonChange) {
+                    val direction = if (eventVolume > previousEventVolume) {
+                        EmergencyVolumeSequence.Direction.UP
+                    } else {
+                        EmergencyVolumeSequence.Direction.DOWN
+                    }
+                    EmergencyVolumeSequence.record(context, direction)
+                } else {
+                    false
+                }
+
+                // Do not generate corrective volume broadcasts in the middle of the ordered
+                // emergency gesture. Normal limit enforcement resumes after it times out.
+                val currentVolume = if (emergencyCompleted || EmergencyVolumeSequence.isInProgress()) {
+                    audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                } else {
+                    VolumeLimitManager.enforce(context, audioManager)
+                }
                 val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 val volumePercent = if (maxVolume > 0) (currentVolume * 100) / maxVolume else 0
                 
                 Log.d(TAG, "Volume changed to $volumePercent% (raw: $currentVolume/$maxVolume)")
-                
+
                 // Check for 5-tap gesture (any volume change direction)
                 checkVolume5Tap(context, currentVolume)
                 

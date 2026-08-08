@@ -37,6 +37,9 @@ class BlockingOverlayManager(private val context: Context) {
     private var regions = listOf<BlockingRegion>()
     private var isEnabled = false
     private var currentForegroundPackage: String? = null
+    private val isSamsungWaf by lazy {
+        context.packageManager.resolveContentProvider("com.xbh.navisetting.controller", 0) != null
+    }
     
     /**
      * Enable or disable blocking overlays globally
@@ -139,13 +142,18 @@ class BlockingOverlayManager(private val context: Context) {
             val widthPercent = (region.xEnd - region.xStart).coerceAtLeast(0f)
             val heightPercent = (region.yEnd - region.yStart).coerceAtLeast(0f)
             val coversMostOfScreen = widthPercent * heightPercent >= 6000f
+            val isWafSideButtonGuard = isSamsungWaf &&
+                widthPercent <= 5f &&
+                heightPercent <= 25f &&
+                ((region.xStart <= 0.1f && region.xEnd <= 5f) ||
+                    (region.xStart >= 95f && region.xEnd >= 99.9f))
 
             // Set background color based on display mode
             // A large opaque region can hide the allowed app completely on Android
             // boards with unusual window metrics. Keep large protection regions
             // touch-blocking but visually transparent so the active app stays visible.
             setBackgroundColor(
-                if (coversMostOfScreen) {
+                if (coversMostOfScreen || isWafSideButtonGuard) {
                     Color.TRANSPARENT
                 } else {
                     when (region.displayMode) {

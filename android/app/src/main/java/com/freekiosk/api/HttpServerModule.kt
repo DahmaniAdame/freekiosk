@@ -43,6 +43,8 @@ import android.os.Build
 import com.freekiosk.DeviceAdminReceiver
 import com.freekiosk.CameraPhotoModule
 import com.freekiosk.FreeKioskAccessibilityService
+import com.freekiosk.KioskExitManager
+import com.freekiosk.MainActivity
 import com.freekiosk.ScreenController
 import com.freekiosk.VolumeLimitManager
 import org.json.JSONObject
@@ -51,6 +53,7 @@ import java.io.ByteArrayOutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * React Native Module for HTTP Server management
@@ -86,6 +89,9 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
     private var jsAutoBrightnessEnabled: Boolean = false
     private var jsAutoBrightnessMin: Int = 10
     private var jsAutoBrightnessMax: Int = 100
+    private var jsAutoBrightnessOffset: Int = 0
+    private var jsMotionDetected: Boolean = false
+    private var jsMotionAlwaysOn: Boolean = false
     
     // Sensor data
     private var sensorManager: SensorManager? = null
@@ -516,9 +522,15 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
             put("enabled", jsAutoBrightnessEnabled)
             put("min", jsAutoBrightnessMin)
             put("max", jsAutoBrightnessMax)
+            put("offset", jsAutoBrightnessOffset)
             put("currentLightLevel", lightValue)
         }
         status.put("autoBrightness", autoBrightnessStatus)
+
+        status.put("motion", JSONObject().apply {
+            put("detected", jsMotionDetected)
+            put("alwaysOn", jsMotionAlwaysOn)
+        })
         
         // Storage
         val storageStatus = getStorageInfo()
@@ -729,12 +741,15 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
             "autoBrightnessEnable" -> {
                 val min = params?.optInt("min", 10) ?: 10
                 val max = params?.optInt("max", 100) ?: 100
+                val hasOffset = params?.has("offset") == true
+                val offset = params?.optInt("offset", 0) ?: 0
                 // Send to JS for handling
                 sendEvent("onApiCommand", Arguments.createMap().apply {
                     putString("command", "autoBrightnessEnable")
                     putString("params", JSONObject().apply {
                         put("min", min)
                         put("max", max)
+                        if (hasOffset) put("offset", offset)
                     }.toString())
                 })
                 return JSONObject().apply {
@@ -742,6 +757,7 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
                     put("command", command)
                     put("min", min)
                     put("max", max)
+                    if (hasOffset) put("offset", offset)
                 }
             }
             "autoBrightnessDisable" -> {
@@ -762,6 +778,7 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
                         put("enabled", jsAutoBrightnessEnabled)
                         put("min", jsAutoBrightnessMin)
                         put("max", jsAutoBrightnessMax)
+                        put("offset", jsAutoBrightnessOffset)
                         put("currentLightLevel", lightValue)
                     })
                 }
@@ -908,6 +925,21 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
                     put("command", command)
                 }
             }
+            "killApp" -> {
+                // Delay the teardown so the HTTP worker can finish writing its 202 response.
+                KioskExitManager.scheduleExit(
+                    context = reactContext,
+                    activity = reactContext.currentActivity as? MainActivity,
+                    terminateProcess = true,
+                    delayMs = 500L,
+                )
+                return JSONObject().apply {
+                    put("executed", true)
+                    put("command", command)
+                    put("scheduled", true)
+                    put("delayMs", 500)
+                }
+            }
             "remoteKey" -> {
                 val key = params?.optString("key", "") ?: ""
                 if (key.isEmpty()) {
@@ -1044,12 +1076,26 @@ class HttpServerModule(private val reactContext: ReactApplicationContext) :
             }
             // Auto-brightness status
             if (status.has("autoBrightnessEnabled")) jsAutoBrightnessEnabled = status.getBoolean("autoBrightnessEnabled")
-            if (status.has("autoBrightnessMin")) jsAutoBrightnessMin = status.getInt("autoBrightnessMin")
-            if (status.has("autoBrightnessMax")) jsAutoBrightnessMax = status.getInt("autoBrightnessMax")
+            if (status.has("autoBrightnessMin")) {
+                jsAutoBrightnessMin = brightnessFractionToPercent(status.getDouble("autoBrightnessMin"))
+            }
+            if (status.has("autoBrightnessMax")) {
+                jsAutoBrightnessMax = brightnessFractionToPercent(status.getDouble("autoBrightnessMax"))
+            }
+            if (status.has("autoBrightnessOffset")) {
+                jsAutoBrightnessOffset = brightnessFractionToPercent(status.getDouble("autoBrightnessOffset"))
+            }
+            if (status.has("motionDetected")) jsMotionDetected = status.getBoolean("motionDetected")
+            if (status.has("motionAlwaysOn")) jsMotionAlwaysOn = status.getBoolean("motionAlwaysOn")
             Log.d(TAG, "Status updated: url=$jsCurrentUrl, screensaver=$jsScreensaverActive, rotation=$jsRotationEnabled, autoBrightness=$jsAutoBrightnessEnabled")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse status update from JS", e)
         }
+    }
+
+    private fun brightnessFractionToPercent(value: Double): Int {
+        val percent = if (value in 0.0..1.0) value * 100.0 else value
+        return percent.roundToInt().coerceIn(0, 100)
     }
 
     @ReactMethod

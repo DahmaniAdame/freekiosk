@@ -6,6 +6,7 @@ import { ManagedApp } from '../types/managedApps';
 import { MediaItem, MediaFitMode } from '../types/mediaPlayer';
 import { saveSecureApiKey, getSecureApiKey, clearSecureApiKey, clearSecureMqttPassword } from './secureStorage';
 import { scheduleSettingsSnapshot } from './SettingsHistoryService';
+import { DEFAULT_WALLPAPER_POSITION, isWallpaperPosition, WallpaperPosition } from '../types/wallpaper';
 
 // All configuration writes in this service pass through this wrapper so a
 // debounced, import-compatible history snapshot is created after each change.
@@ -55,6 +56,9 @@ const KEYS = {
   EXTERNAL_APP_PACKAGE: '@kiosk_external_app_package',
   EXTERNAL_APP_MODE: '@kiosk_external_app_mode', // 'single' | 'multi'
   EXTERNAL_APP_BACKGROUND_COLOR: '@kiosk_external_app_background_color',
+  EXTERNAL_APP_BACKGROUND_IMAGE_ENABLED: '@kiosk_external_app_background_image_enabled',
+  EXTERNAL_APP_BACKGROUND_IMAGE: '@kiosk_external_app_background_image',
+  EXTERNAL_APP_BACKGROUND_POSITION: '@kiosk_external_app_background_position',
   AUTO_RELAUNCH_APP: '@kiosk_auto_relaunch_app',
   OVERLAY_BUTTON_VISIBLE: '@kiosk_overlay_button_visible',
   OVERLAY_BUTTON_POSITION: '@kiosk_overlay_button_position',
@@ -930,6 +934,59 @@ export const StorageService = {
     } catch (error) {
       console.error('Error getting external app background color:', error);
       return '#333';
+    }
+  },
+
+  saveExternalAppBackgroundImageEnabled: async (value: boolean): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.EXTERNAL_APP_BACKGROUND_IMAGE_ENABLED, JSON.stringify(value));
+    } catch (error) {
+      console.error('Error saving external app background image enabled:', error);
+    }
+  },
+
+  getExternalAppBackgroundImageEnabled: async (): Promise<boolean> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.EXTERNAL_APP_BACKGROUND_IMAGE_ENABLED);
+      return value === null ? true : JSON.parse(value);
+    } catch (error) {
+      console.error('Error getting external app background image enabled:', error);
+      return true;
+    }
+  },
+
+  saveExternalAppBackgroundImage: async (value: string): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.EXTERNAL_APP_BACKGROUND_IMAGE, value.trim());
+    } catch (error) {
+      console.error('Error saving external app background image:', error);
+    }
+  },
+
+  getExternalAppBackgroundImage: async (): Promise<string> => {
+    try {
+      return (await AsyncStorage.getItem(KEYS.EXTERNAL_APP_BACKGROUND_IMAGE))?.trim() ?? '';
+    } catch (error) {
+      console.error('Error getting external app background image:', error);
+      return '';
+    }
+  },
+
+  saveExternalAppBackgroundPosition: async (value: WallpaperPosition): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(KEYS.EXTERNAL_APP_BACKGROUND_POSITION, value);
+    } catch (error) {
+      console.error('Error saving external app background position:', error);
+    }
+  },
+
+  getExternalAppBackgroundPosition: async (): Promise<WallpaperPosition> => {
+    try {
+      const value = await AsyncStorage.getItem(KEYS.EXTERNAL_APP_BACKGROUND_POSITION);
+      return isWallpaperPosition(value) ? value : DEFAULT_WALLPAPER_POSITION;
+    } catch (error) {
+      console.error('Error getting external app background position:', error);
+      return DEFAULT_WALLPAPER_POSITION;
     }
   },
 

@@ -36,6 +36,9 @@ const BACKUP_KEYS = [
   '@kiosk_external_app_package',
   '@kiosk_external_app_mode',
   '@kiosk_external_app_background_color',
+  '@kiosk_external_app_background_image_enabled',
+  '@kiosk_external_app_background_image',
+  '@kiosk_external_app_background_position',
   '@kiosk_auto_relaunch_app',
   '@kiosk_overlay_button_visible',
   '@kiosk_overlay_button_position',
@@ -170,7 +173,7 @@ export interface BackupData {
 }
 
 const BACKUP_VERSION = '1.0';
-const APP_VERSION = '1.2.27';
+const APP_VERSION = '1.2.30';
 
 /**
  * Request storage permissions on Android

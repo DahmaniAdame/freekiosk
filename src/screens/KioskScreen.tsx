@@ -29,6 +29,7 @@ import type { RootStackParamList } from '../navigation/AppNavigator';
 import Icon from '../components/Icon';
 import { revokeSettingsAccess } from '../utils/authState';
 import { scheduleSettingsSnapshot } from '../utils/SettingsHistoryService';
+import { DEFAULT_WALLPAPER_POSITION, isWallpaperPosition, WallpaperPosition } from '../types/wallpaper';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 
 const { HttpServerModule } = NativeModules;
@@ -101,6 +102,9 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   const [managedApps, setManagedApps] = useState<import('../types/managedApps').ManagedApp[]>([]);
   const [externalAppMode, setExternalAppMode] = useState<'single' | 'multi'>('single');
   const [externalAppBackgroundColor, setExternalAppBackgroundColor] = useState<string>('#333');
+  const [externalAppBackgroundImageEnabled, setExternalAppBackgroundImageEnabled] = useState<boolean>(true);
+  const [externalAppBackgroundImage, setExternalAppBackgroundImage] = useState<string>('');
+  const [externalAppBackgroundPosition, setExternalAppBackgroundPosition] = useState<WallpaperPosition>(DEFAULT_WALLPAPER_POSITION);
   const externalAppModeRef = useRef<'single' | 'multi'>('single');
   
   // Spatial proximity detection for N-tap (WebView mode)
@@ -865,9 +869,10 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       autoBrightnessEnabled: autoBrightnessEnabled,
       autoBrightnessMin: autoBrightnessMin,
       autoBrightnessMax: autoBrightnessMax,
+      autoBrightnessOffset: autoBrightnessOffset,
       motionAlwaysOn: motionAlwaysOn,
     });
-  }, [url, defaultBrightness, isScreensaverActive, urlRotationEnabled, urlRotationList, urlRotationInterval, currentUrlIndex, autoBrightnessEnabled, autoBrightnessMin, autoBrightnessMax, motionAlwaysOn]);
+  }, [url, defaultBrightness, isScreensaverActive, urlRotationEnabled, urlRotationList, urlRotationInterval, currentUrlIndex, autoBrightnessEnabled, autoBrightnessMin, autoBrightnessMax, autoBrightnessOffset, motionAlwaysOn]);
 
   // Countdown timer effect (transparent - no UI)
   useEffect(() => {
@@ -1571,8 +1576,17 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       const savedExternalAppBackgroundColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(storedExternalAppBackgroundColor)
         ? storedExternalAppBackgroundColor
         : '#333';
+      const savedExternalAppBackgroundImageEnabled = bool(K.EXTERNAL_APP_BACKGROUND_IMAGE_ENABLED, true);
+      const savedExternalAppBackgroundImage = str(K.EXTERNAL_APP_BACKGROUND_IMAGE) ?? '';
+      const storedExternalAppBackgroundPosition = str(K.EXTERNAL_APP_BACKGROUND_POSITION);
+      const savedExternalAppBackgroundPosition = isWallpaperPosition(storedExternalAppBackgroundPosition)
+        ? storedExternalAppBackgroundPosition
+        : DEFAULT_WALLPAPER_POSITION;
       setExternalAppMode(savedExternalAppMode);
       setExternalAppBackgroundColor(savedExternalAppBackgroundColor);
+      setExternalAppBackgroundImageEnabled(savedExternalAppBackgroundImageEnabled);
+      setExternalAppBackgroundImage(savedExternalAppBackgroundImage);
+      setExternalAppBackgroundPosition(savedExternalAppBackgroundPosition);
       externalAppModeRef.current = savedExternalAppMode;
       console.log('[KioskScreen] External app mode:', savedExternalAppMode);
       
@@ -1849,7 +1863,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       }
       
       // Start keep-alive background monitor for any mode that has keepAlive apps configured
-      if (savedDisplayMode === 'webview') {
+      if (savedKioskEnabled && savedDisplayMode === 'webview') {
         try {
           await AppLauncherModule.startBackgroundMonitor();
           console.log('[KioskScreen] Background monitor started for webview mode (will auto-stop if no keep-alive apps)');
@@ -1858,7 +1872,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
         }
       }
 
-      if (savedDisplayMode === 'external_app') {
+      if (savedKioskEnabled && savedDisplayMode === 'external_app') {
         // Launch managed apps with launchOnBoot=true — only once per app session.
         // Calling this on every loadSettings() (e.g. return from Settings) would
         // launch boot apps again, bring Velocity to foreground, then bringFreeKioskToFront
@@ -2465,12 +2479,14 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
     const isVoluntary = event?.voluntary ?? false;
     setIsAppLaunched(false);
 
-    // Stop OverlayService when returning to FreeKiosk
-    OverlayServiceModule.stopOverlayService()
-      .catch(error => console.warn('[KioskScreen] Failed to stop overlay:', error));
-
-    // On a voluntary return (5-tap), the native flag is already set by OverlayService
+    // External apps can briefly expose FreeKiosk while switching between their own
+    // launch activities. Keep the service alive so its foreground watcher restores
+    // the close button when the external app becomes visible again.
     if (isVoluntary) {
+      OverlayServiceModule.stopOverlayService()
+        .catch(error => console.warn('[KioskScreen] Failed to stop overlay:', error));
+
+      // The native flag is already set by OverlayService on a voluntary return.
       setAppCrashCount(0);
     }
     // Note: Automatic relaunch is now handled by the AppState listener
@@ -2666,6 +2682,9 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
           managedApps={managedApps}
           externalAppMode={externalAppMode}
           backgroundColor={externalAppBackgroundColor}
+          backgroundImageEnabled={externalAppBackgroundImageEnabled}
+          backgroundImage={externalAppBackgroundImage}
+          backgroundImagePosition={externalAppBackgroundPosition}
           isAppLaunched={isAppLaunched}
           backButtonMode={backButtonMode}
           returnTapCount={returnTapCount}

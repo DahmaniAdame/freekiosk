@@ -258,13 +258,13 @@ const SecurityTab: React.FC<SecurityTabProps> = ({
           </>
         )}
 
-        {/* Block factory reset — Device Owner only, independent of Lock Mode (#201) */}
+        {/* Saved Device Owner choice; enforced only while Lock Mode is active. */}
         {isDeviceOwner && (
           <>
             <View style={styles.divider} />
             <SettingsSwitch
               label="🛑 Block Factory Reset"
-              hint="Removes the 'Factory reset' option from the system Settings app (Device Owner restriction). Useful when the Settings app is on your multi-app whitelist, so locked users can't wipe the device. Persists across reboots. Takes effect immediately, even outside Lock Mode."
+              hint="Removes the 'Factory reset' option from system Settings while Lock Mode is active, so locked users cannot wipe the device. The choice is saved for future kiosk sessions and the restriction is removed when kiosk mode exits."
               value={blockFactoryReset}
               onValueChange={onBlockFactoryResetChange}
             />

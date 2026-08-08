@@ -3,6 +3,9 @@ import { View, Text, TouchableOpacity, StyleSheet, Image, ScrollView, FlatList, 
 import StatusBar from './StatusBar';
 import AppLauncherModule, { AppInfo } from '../utils/AppLauncherModule';
 import { ManagedApp } from '../types/managedApps';
+import { DEFAULT_WALLPAPER_POSITION, WallpaperPosition } from '../types/wallpaper';
+
+const DEFAULT_WALLPAPER = require('../assets/images/wallpaper.png');
 
 interface ExternalAppOverlayProps {
   /** Legacy single-app package (backward compat) */
@@ -13,6 +16,12 @@ interface ExternalAppOverlayProps {
   externalAppMode?: 'single' | 'multi';
   /** Background color for the external-app kiosk screens */
   backgroundColor?: string;
+  /** Whether a wallpaper is rendered above the fallback background color */
+  backgroundImageEnabled?: boolean;
+  /** Custom HTTP(S)/file URI. Empty uses the bundled wallpaper.png. */
+  backgroundImage?: string;
+  /** Anchor used when the cover-scaled image is cropped */
+  backgroundImagePosition?: WallpaperPosition;
   isAppLaunched: boolean;
   backButtonMode: string;
   /** Number of taps to return to settings (default 5) */
@@ -43,6 +52,9 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   managedApps = [],
   externalAppMode = 'single',
   backgroundColor = '#333',
+  backgroundImageEnabled = true,
+  backgroundImage = '',
+  backgroundImagePosition = DEFAULT_WALLPAPER_POSITION,
   isAppLaunched,
   backButtonMode,
   returnTapCount = 5,
@@ -63,7 +75,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
 }) => {
   // Window dimensions must be reactive — `Dimensions.get('window')` is evaluated once
   // at module load, so tile widths captured in landscape stay wrong after rotation to portrait.
-  const { width: windowWidth } = useWindowDimensions();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const APP_GRID_MAX_COLUMNS = 6;
   const APP_GRID_MIN_TILE_WIDTH = 88;
   const APP_GRID_MAX_TILE_WIDTH = 128;
@@ -82,6 +94,54 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
 
   const [appLabels, setAppLabels] = useState<Record<string, string>>({});
   const [appIcons, setAppIcons] = useState<Record<string, string>>({});
+  const defaultWallpaperSize = Image.resolveAssetSource(DEFAULT_WALLPAPER);
+  const [wallpaperSize, setWallpaperSize] = useState({
+    width: defaultWallpaperSize.width,
+    height: defaultWallpaperSize.height,
+  });
+  const [wallpaperFailed, setWallpaperFailed] = useState(false);
+
+  useEffect(() => {
+    setWallpaperFailed(false);
+    if (!backgroundImage) {
+      setWallpaperSize({ width: defaultWallpaperSize.width, height: defaultWallpaperSize.height });
+      return;
+    }
+    Image.getSize(
+      backgroundImage,
+      (width, height) => setWallpaperSize({ width, height }),
+      () => setWallpaperFailed(true),
+    );
+  }, [backgroundImage, defaultWallpaperSize.height, defaultWallpaperSize.width]);
+
+  const wallpaperLayout = useMemo(() => {
+    if (wallpaperSize.width <= 0 || wallpaperSize.height <= 0) return null;
+    const scale = Math.max(windowWidth / wallpaperSize.width, windowHeight / wallpaperSize.height);
+    const width = wallpaperSize.width * scale;
+    const height = wallpaperSize.height * scale;
+    const [vertical, horizontal] = backgroundImagePosition.split('-');
+    const horizontalRatio = horizontal === 'left' ? 0 : horizontal === 'right' ? 1 : 0.5;
+    const verticalRatio = vertical === 'top' ? 0 : vertical === 'bottom' ? 1 : 0.5;
+    return {
+      width,
+      height,
+      left: (windowWidth - width) * horizontalRatio,
+      top: (windowHeight - height) * verticalRatio,
+    };
+  }, [backgroundImagePosition, wallpaperSize, windowHeight, windowWidth]);
+
+  const renderWallpaper = () => {
+    if (!backgroundImageEnabled || wallpaperFailed || !wallpaperLayout) return null;
+    return (
+      <Image
+        source={backgroundImage ? { uri: backgroundImage } : DEFAULT_WALLPAPER}
+        style={[styles.wallpaper, wallpaperLayout]}
+        resizeMode="stretch"
+        accessible={false}
+        onError={() => setWallpaperFailed(true)}
+      />
+    );
+  };
   
   // Return to settings — same mechanism as WebView (tap_anywhere / button)
   const gridTapCountRef = useRef<number>(0);
@@ -264,6 +324,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   if (isMultiAppMode) {
     return (
       <View style={[styles.container, { backgroundColor }]} onTouchStart={handleGridTouch}>
+        {renderWallpaper()}
         {showStatusBar && (
           <StatusBar
             showBattery={showBattery}
@@ -325,6 +386,7 @@ const ExternalAppOverlay: React.FC<ExternalAppOverlayProps> = ({
   // Single-app mode or app is running: show original overlay
   return (
     <View style={[styles.container, { backgroundColor }]}>
+      {renderWallpaper()}
       {showStatusBar && (
         <StatusBar
           showBattery={showBattery}
@@ -422,6 +484,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#333',
+    overflow: 'hidden',
+  },
+  wallpaper: {
+    position: 'absolute',
   },
   scrollContent: {
     flexGrow: 1,

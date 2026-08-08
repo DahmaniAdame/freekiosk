@@ -147,48 +147,29 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
     @ReactMethod
     fun exitKioskMode(promise: Promise) {
         try {
-            val activity = reactApplicationContext.currentActivity
-            if (activity != null && activity is MainActivity) {
-                // Do NOT write @kiosk_enabled=false here — the watchdog is stopped
-                // explicitly below, so the AsyncStorage write is unnecessary for that.
-                // Writing false was permanently disabling Lock Mode after an admin exit,
-                // which is a regression: kiosk mode should re-engage on the next FK launch.
-                // (#124, #138)
-                //
-                // Only clear the DE fast-boot flag so BootLockActivity does not
-                // hard-lock the device on the next reboot (the admin just exited
-                // intentionally; normal kiosk start via MainActivity still fires
-                // because @kiosk_enabled remains true in AsyncStorage).
-                try {
-                    BootReceiver.updateDeBootFlag(reactApplicationContext, false)
-                } catch (e: Exception) {
-                    android.util.Log.e("KioskModule", "Failed to clear DE boot flag: ${e.message}")
-                }
-
-                // Explicitly stop KioskWatchdogService (#96 fix)
-                stopKioskWatchdog()
-                KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
-                KioskSystemUiPolicy.restore(reactApplicationContext)
-
-                activity.runOnUiThread {
-                    try {
-                        val dpm = reactApplicationContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-                        val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
-                        if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
-                            dpm.setScreenCaptureDisabled(adminComponent, false)
-                            dpm.setStatusBarDisabled(adminComponent, false)
-                        }
-                        activity.disableKioskRestrictions()
-                        activity.stopLockTask()
-                        activity.finish()
-                        promise.resolve(true)
-                    } catch (e: Exception) {
-                        promise.reject("ERROR", "Failed to exit kiosk mode: ${e.message}")
-                    }
-                }
-            } else {
+            val activity = reactApplicationContext.currentActivity as? MainActivity
+            if (activity == null) {
                 promise.reject("ERROR", "Activity not available")
+                return
             }
+
+            // Use exactly the same native teardown as the REST kill switch. The manager also
+            // persists the disabled state itself, so this remains safe if the preceding JS
+            // AsyncStorage write was acknowledged but not yet durable on an unusual device.
+            KioskExitManager.scheduleExit(
+                context = reactApplicationContext,
+                activity = activity,
+                terminateProcess = false,
+                completion = { warnings ->
+                    if (warnings.isNotEmpty()) {
+                        android.util.Log.w(
+                            "KioskModule",
+                            "Kiosk exit completed with warnings: ${warnings.joinToString()}"
+                        )
+                    }
+                    promise.resolve(true)
+                },
+            )
         } catch (e: Exception) {
             promise.reject("ERROR", "Failed to exit kiosk mode: ${e.message}")
         }
@@ -229,36 +210,34 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
             }
             // Clear our own persistent preferences first (idempotent), then re-add when enabling.
             dpm.clearPackagePersistentPreferredActivities(admin, reactApplicationContext.packageName)
+            val homeComponent = ComponentName(
+                reactApplicationContext.packageName,
+                "${reactApplicationContext.packageName}.KioskHomeActivity"
+            )
             if (enabled) {
+                reactApplicationContext.packageManager.setComponentEnabledSetting(
+                    homeComponent,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    PackageManager.DONT_KILL_APP
+                )
                 val filter = android.content.IntentFilter(Intent.ACTION_MAIN).apply {
                     addCategory(Intent.CATEGORY_HOME)
                     addCategory(Intent.CATEGORY_DEFAULT)
                 }
                 dpm.addPersistentPreferredActivity(
-                    admin, filter, ComponentName(reactApplicationContext, MainActivity::class.java)
+                    admin, filter, homeComponent
+                )
+            } else {
+                reactApplicationContext.packageManager.setComponentEnabledSetting(
+                    homeComponent,
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    PackageManager.DONT_KILL_APP
                 )
             }
             android.util.Log.d("KioskModule", "Default launcher mode set: $enabled")
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", "Failed to set default launcher mode: ${e.message}")
-        }
-    }
-
-    /**
-     * Stop the KioskWatchdogService and cancel its notification.
-     * Called on intentional kiosk exit to prevent the watchdog from relaunching the app.
-     */
-    private fun stopKioskWatchdog() {
-        try {
-            val serviceIntent = Intent(reactApplicationContext, KioskWatchdogService::class.java)
-            reactApplicationContext.stopService(serviceIntent)
-            // Also cancel the notification in case stopService races with onDestroy
-            val nm = reactApplicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-            nm.cancel(2002) // KioskWatchdogService.NOTIFICATION_ID
-            android.util.Log.d("KioskModule", "KioskWatchdogService stopped and notification cleared")
-        } catch (e: Exception) {
-            android.util.Log.e("KioskModule", "Error stopping KioskWatchdogService: ${e.message}")
         }
     }
 
@@ -304,6 +283,10 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
 
                         if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
+                            // Reapply every lifecycle-scoped Device Owner policy. Exit/temporary
+                            // unlock clears these so Android is unrestricted outside Lock Mode.
+                            activity.enableKioskRestrictions()
+
                             // Strict visible-app allowlist: FreeKiosk home + the active
                             // single app, or apps explicitly shown on the multi-app home.
                             val whitelist = mutableListOf(reactApplicationContext.packageName)
@@ -380,6 +363,13 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                             dpm.setLockTaskPackages(adminComponent, uniqueWhitelist.toTypedArray())
                             activity.startLockTask()
                             dpm.setScreenCaptureDisabled(adminComponent, true)
+                            val activityManager = reactApplicationContext
+                                .getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                            check(
+                                activityManager.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_LOCKED
+                            ) {
+                                "Android did not enter Device Owner lock-task mode"
+                            }
                             android.util.Log.d("KioskModule", "Full lock task started (Device Owner) with whitelist: $uniqueWhitelist")
                             // Update DE boot flag so the next LOCKED_BOOT_COMPLETED also locks immediately
                             BootReceiver.updateDeBootFlag(reactApplicationContext, true)
@@ -415,6 +405,9 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         promise.resolve(true)
                     } catch (e: Exception) {
                         android.util.Log.e("KioskModule", "Failed to start lock task: ${e.message}")
+                        runCatching { activity.stopLockTask() }
+                        runCatching { activity.disableKioskRestrictions() }
+                        runCatching { BootReceiver.updateDeBootFlag(reactApplicationContext, false) }
                         promise.reject("ERROR", "Failed to start lock task: ${e.message}")
                     }
                 }
@@ -435,13 +428,28 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                     try {
                         val dpm = reactApplicationContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                         val adminComponent = ComponentName(reactApplicationContext, DeviceAdminReceiver::class.java)
+                        val activityManager = reactApplicationContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                         if (dpm.isDeviceOwnerApp(reactApplicationContext.packageName)) {
-                            dpm.setScreenCaptureDisabled(adminComponent, false)
-                            dpm.setStatusBarDisabled(adminComponent, false)
+                            if (activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
+                                runCatching { activity.stopLockTask() }
+                            }
+                            // Samsung WAF can ignore stopLockTask() while the package remains in
+                            // the Device Owner allowlist. Removing it forces the locked task out.
+                            dpm.setLockTaskPackages(adminComponent, emptyArray())
+                            if (activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
+                                runCatching { activity.stopLockTask() }
+                            }
+                            activity.disableKioskRestrictions()
+                            BootReceiver.updateDeBootFlag(reactApplicationContext, false)
+                        } else {
+                            activity.stopLockTask()
                         }
                         KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
                         KioskSystemUiPolicy.restore(reactApplicationContext)
-                        activity.stopLockTask()
+                        if (activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
+                            promise.reject("ERROR", "Android remained in lock-task mode after cleanup")
+                            return@runOnUiThread
+                        }
                         android.util.Log.d("KioskModule", "Lock task stopped")
                         promise.resolve(true)
                     } catch (e: Exception) {
@@ -1006,6 +1014,32 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
         } catch (e: Exception) {
             android.util.Log.e("KioskModule", "Failed to clear ADB PIN hash: ${e.message}")
             promise.reject("ERROR", "Failed to clear ADB PIN hash: ${e.message}")
+        }
+    }
+
+    /**
+     * Make an explicit Settings-screen enable authoritative over an older exit fallback.
+     * The exit manager normally clears this value after a durable database write; this is
+     * defensive migration for devices that ran a build which left the delayed false behind.
+     */
+    @ReactMethod
+    fun prepareKioskEnable(promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences(
+                "FreeKioskPendingConfig",
+                Context.MODE_PRIVATE,
+            )
+            if (prefs.getString("@kiosk_enabled", null) == "false") {
+                val remainingKeys = prefs.all.keys - "@kiosk_enabled" - "has_pending_config"
+                val editor = prefs.edit().remove("@kiosk_enabled")
+                if (remainingKeys.isEmpty()) editor.remove("has_pending_config")
+                check(editor.commit()) { "Could not clear stale pending kiosk exit" }
+            }
+            MainActivity.blockAutoRelaunch = false
+            promise.resolve(true)
+        } catch (e: Exception) {
+            android.util.Log.e("KioskModule", "Failed to prepare kiosk enable: ${e.message}")
+            promise.reject("ERROR", "Failed to prepare kiosk enable: ${e.message}")
         }
     }
 

@@ -53,6 +53,7 @@ export interface AppStatus {
   autoBrightnessEnabled?: boolean;
   autoBrightnessMin?: number;
   autoBrightnessMax?: number;
+  autoBrightnessOffset?: number;
   scheduledSleep?: boolean;
   motionDetected?: boolean;
   motionAlwaysOn?: boolean;

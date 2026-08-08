@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add authenticated REST control parity for auto-brightness (including offset) and always-on motion detection, plus motion status reporting.
+- Add `POST /api/exit` (with `/api/kiosk/exit` and `/api/app/kill` aliases) as an explicit-confirmation emergency kill switch. It persistently disables Lock Mode/default-launcher mode, clears kiosk policies and services, returns to Android Home, and terminates the FreeKiosk process without removing Device Owner or erasing configuration.
+- Add authenticated `GET`/`POST /api/settings` endpoints for a typed allowlist of non-secret FreeKiosk settings. Remote writes support Set and Unset, validate value types, and explicitly report when a UI restart is required.
+- Add a native emergency hardware kill switch: press Volume Up three times, then Volume Down three times in order. It remains independent of React Native UI health and performs the same complete kiosk exit and restriction cleanup as the Settings/API exit paths.
+- Add an optional kiosk wallpaper behind the app grid and external-app return screen. The bundled `wallpaper.png` is enabled by default at bottom-center; admins can choose a device image or URL, disable the wallpaper, and select any of nine top/center/bottom × left/center/right anchors.
+
+### Fixed
+- Suppress the privileged Launcher3 tablet taskbar on Samsung WAF only while Lock Mode is active. The firmware ignores immersive mode for this higher-layer window, so FreeKiosk now applies the smallest density profile change that prevents Launcher3 from creating it, preserves the previous display-density override, and restores it on kiosk exit. The replacement phone-profile navigation window obeys the existing immersive and lock-task restrictions. WAF side-button touch guards are also forced visually transparent while continuing to consume touches.
+- Hide every Samsung WAF side-menu handle and expanded-menu button only while Lock Mode is active by using the signed OEM navigation app's exported controller and persistent enable settings. The exact prior OEM values are preserved and restored on kiosk exit, avoiding both the ineffective lower-layer FreeKiosk touch zones and the firmware crashes caused by hiding `com.xbh.navisetting` itself.
+- Do not hide Samsung WAF system packages during Lock Mode activation. Hiding `com.xbh.navisetting` crashes the firmware's `com.xbh.launcher` PACKAGE_CHANGED receiver, while hiding `com.android.launcher3` destabilizes Quickstep/Recents and can trigger a reboot. The exit path still restores stale hidden state left by earlier test builds.
+- Prevent a completed kiosk exit from leaving a delayed `kiosk_enabled=false` fallback that can overwrite a later admin re-enable. Lock Mode enable now clears any stale exit fallback, requires Android to confirm `LOCKED` before reporting success, and no longer removes Device Owner restrictions merely because the activity is destroyed or recreated.
+- Scope Device Owner restrictions to the Lock Mode lifecycle. Exiting now reliably releases the active lock task (including Samsung/WAF fallback through allowlist removal), restores status/navigation bars, screen capture, Android Settings menus, factory reset, accessibility-service selection, suspended update packages, system-update policy, and the normal HOME launcher. Saved policy choices are retained and reapplied when Lock Mode is enabled again.
+- Keep the external-app overlay service alive across transient returns to FreeKiosk during multi-activity app startup, preventing the close button from disappearing in apps such as Netflix.
+- Make **Exit Kiosk Mode** persistently disable Lock Mode, temporarily remove FreeKiosk from Android HOME resolution, stop kiosk protection services, and return directly to the normal device launcher instead of immediately relocking or reopening FreeKiosk. The saved default-launcher preference is retained for the next Lock Mode entry. External-app services and automatic app launch stay off whenever Lock Mode is off.
+
 ## [1.2.20-beta.5] - 2026-07-21
 
 ### Fixed

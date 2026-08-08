@@ -35,6 +35,10 @@ import androidx.core.content.ContextCompat
 class MainActivity : ReactActivity() {
 
   companion object {
+    // Current host Activity for native emergency teardown paths (cleared on destroy).
+    @Volatile
+    var currentInstance: MainActivity? = null
+
     // Flag partagé pour bloquer le relaunch - accessible depuis OverlayService
     @Volatile
     var blockAutoRelaunch = false
@@ -77,6 +81,7 @@ class MainActivity : ReactActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null)
+    currentInstance = this
 
     // Keep screen always on
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -288,7 +293,7 @@ class MainActivity : ReactActivity() {
 
   /**
    * Opt-in default-launcher policy (#199). When the "Set FreeKiosk as default launcher"
-   * setting is ON and we are Device Owner, register FreeKiosk (MainActivity) as the PERSISTENT
+   * setting is ON and we are Device Owner, register FreeKiosk's dedicated HOME alias as the PERSISTENT
    * preferred Home activity. The system then relaunches FreeKiosk itself at every boot and on
    * Home — with no dependency on the OEM "appear on top" / autostart / background-pop-up
    * permissions that Samsung resets on OS updates, which is what let the kiosk drop out after a
@@ -300,21 +305,35 @@ class MainActivity : ReactActivity() {
    */
   private fun applyDefaultLauncherPolicy() {
     if (!devicePolicyManager.isDeviceOwnerApp(packageName)) return
-    val enabled = getAsyncStorageValue("@kiosk_default_launcher", "false") == "true"
+    // The saved preference is the desired kiosk configuration. The active HOME policy is
+    // lifecycle-scoped and must never remain installed while Lock Mode is off.
+    val enabled = isKioskEnabled() &&
+      getAsyncStorageValue("@kiosk_default_launcher", "false") == "true"
+    val homeComponent = ComponentName(packageName, "$packageName.KioskHomeActivity")
     try {
       // Only ever clears persistent preferences set by THIS admin (we set none other than HOME),
       // so this is safe and idempotent — it prevents duplicate entries accumulating.
       devicePolicyManager.clearPackagePersistentPreferredActivities(adminComponent, packageName)
       if (enabled) {
+        packageManager.setComponentEnabledSetting(
+          homeComponent,
+          PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+          PackageManager.DONT_KILL_APP
+        )
         val filter = IntentFilter(Intent.ACTION_MAIN).apply {
           addCategory(Intent.CATEGORY_HOME)
           addCategory(Intent.CATEGORY_DEFAULT)
         }
         devicePolicyManager.addPersistentPreferredActivity(
-          adminComponent, filter, ComponentName(this, MainActivity::class.java)
+          adminComponent, filter, homeComponent
         )
         DebugLog.d("MainActivity", "Default launcher policy applied (FreeKiosk = persistent Home)")
       } else {
+        packageManager.setComponentEnabledSetting(
+          homeComponent,
+          PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+          PackageManager.DONT_KILL_APP
+        )
         DebugLog.d("MainActivity", "Default launcher policy off — persistent Home cleared")
       }
     } catch (e: Exception) {
@@ -433,10 +452,13 @@ class MainActivity : ReactActivity() {
     }
   }
 
-  private fun enableKioskRestrictions() {
+  fun enableKioskRestrictions() {
     if (!devicePolicyManager.isDeviceOwnerApp(packageName)) return
 
     try {
+      KioskSystemUiPolicy.enable(this)
+      applyDefaultLauncherPolicy()
+
       // Read settings from AsyncStorage v2 database
       // allowPowerButton: true = power menu allowed (default), false = blocked by admin
       val allowPowerButtonValue = getAsyncStorageValue("@kiosk_allow_power_button", "true")
@@ -486,6 +508,27 @@ class MainActivity : ReactActivity() {
       // Available before lock-task feature flags (API 23+), so keep the status
       // bar and notification shade disabled on older Device Owner tablets too.
       devicePolicyManager.setStatusBarDisabled(adminComponent, true)
+      devicePolicyManager.setScreenCaptureDisabled(adminComponent, true)
+
+      // Device Owner policies that affect Android Settings are active only during Lock Mode.
+      // Their saved values remain untouched so the next kiosk entry can reapply them.
+      val blockFactoryReset =
+        getAsyncStorageValue("@kiosk_block_factory_reset", "false") == "true"
+      if (blockFactoryReset) {
+        devicePolicyManager.addUserRestriction(
+          adminComponent,
+          android.os.UserManager.DISALLOW_FACTORY_RESET
+        )
+      } else {
+        devicePolicyManager.clearUserRestriction(
+          adminComponent,
+          android.os.UserManager.DISALLOW_FACTORY_RESET
+        )
+      }
+      devicePolicyManager.setPermittedAccessibilityServices(
+        adminComponent,
+        getKioskAccessibilityPackages()
+      )
       
       // Safety net: force unmute audio streams after configuring lock task
       // Samsung/OneUI devices may mute audio in LOCK_TASK_MODE_LOCKED
@@ -515,6 +558,7 @@ class MainActivity : ReactActivity() {
       )
       
       devicePolicyManager.setPackagesSuspended(adminComponent, samsungUpdateApps, true)
+      WafSideMenuPolicy.hideForKiosk(this, devicePolicyManager, adminComponent)
       
       val policy = android.app.admin.SystemUpdatePolicy.createPostponeInstallPolicy()
       devicePolicyManager.setSystemUpdatePolicy(adminComponent, policy)
@@ -542,6 +586,25 @@ class MainActivity : ReactActivity() {
         DebugLog.d("MainActivity", "Lock task features restored to defaults")
       }
       devicePolicyManager.setStatusBarDisabled(adminComponent, false)
+      devicePolicyManager.setScreenCaptureDisabled(adminComponent, false)
+      devicePolicyManager.setLockTaskPackages(adminComponent, emptyArray())
+      devicePolicyManager.clearUserRestriction(
+        adminComponent,
+        android.os.UserManager.DISALLOW_FACTORY_RESET
+      )
+      devicePolicyManager.setPermittedAccessibilityServices(adminComponent, null)
+      devicePolicyManager.clearPackagePersistentPreferredActivities(adminComponent, packageName)
+
+      listOf(
+        ComponentName(packageName, "$packageName.KioskHomeActivity"),
+        ComponentName(this, HomeActivity::class.java),
+      ).forEach { component ->
+        packageManager.setComponentEnabledSetting(
+          component,
+          PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+          PackageManager.DONT_KILL_APP
+        )
+      }
 
       val samsungUpdateApps = arrayOf(
         "com.samsung.android.app.updatecenter",
@@ -552,11 +615,33 @@ class MainActivity : ReactActivity() {
       )
       
       devicePolicyManager.setPackagesSuspended(adminComponent, samsungUpdateApps, false)
+      WafSideMenuPolicy.restoreAfterKiosk(this, devicePolicyManager, adminComponent)
       devicePolicyManager.setSystemUpdatePolicy(adminComponent, null)
+      KioskSystemUiPolicy.restore(this)
+      showSystemUI()
 
       DebugLog.d("MainActivity", "Kiosk restrictions disabled")
     } catch (e: Exception) {
       DebugLog.errorProduction("MainActivity", "Error disabling restrictions: ${e.message}")
+    }
+  }
+
+  private fun getKioskAccessibilityPackages(): List<String> {
+    val permitted = mutableListOf(packageName)
+    return try {
+      val apps = org.json.JSONArray(getAsyncStorageValue("@kiosk_managed_apps", "[]"))
+      for (index in 0 until apps.length()) {
+        val app = apps.optJSONObject(index) ?: continue
+        if (app.optBoolean("allowAccessibility", false)) {
+          app.optString("packageName")
+            .takeIf { it.isNotBlank() }
+            ?.let { permitted.add(it) }
+        }
+      }
+      permitted.distinct()
+    } catch (e: Exception) {
+      DebugLog.d("MainActivity", "Could not read accessibility allowlist: ${e.message}")
+      permitted
     }
   }
 
@@ -809,9 +894,11 @@ class MainActivity : ReactActivity() {
   }
 
   private fun hideSystemUI() {
-    if (isKioskEnabled()) {
-      KioskSystemUiPolicy.enable(this)
+    if (!isKioskEnabled()) {
+      showSystemUI()
+      return
     }
+    KioskSystemUiPolicy.enable(this)
     // Pour Android 11+ (API 30+), utiliser la nouvelle API WindowInsetsController
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
       window.insetsController?.apply {
@@ -835,6 +922,15 @@ class MainActivity : ReactActivity() {
     }
   }
 
+  private fun showSystemUI() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      window.insetsController?.show(WindowInsets.Type.systemBars())
+    } else {
+      @Suppress("DEPRECATION")
+      window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+    }
+  }
+
   // Volume Up 5-tap tracking
   private var volumeUpTapCount = 0
   private var volumeUpLastTapTime = 0L
@@ -850,6 +946,19 @@ class MainActivity : ReactActivity() {
         android.util.Log.d("MainActivity", "Ignoring volume key repeat (repeatCount=${event.repeatCount})")
       }
       return super.onKeyDown(keyCode, event)
+    }
+
+    // Always-available native kill switch: Volume Up x3, then Volume Down x3.
+    // It uses the same complete teardown as the Settings and authenticated API exits.
+    if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+      val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+        EmergencyVolumeSequence.Direction.UP
+      } else {
+        EmergencyVolumeSequence.Direction.DOWN
+      }
+      if (EmergencyVolumeSequence.record(this, direction)) {
+        return true
+      }
     }
     
     // Intercept Volume Up key events
@@ -1858,7 +1967,18 @@ class MainActivity : ReactActivity() {
 
   override fun onDestroy() {
     super.onDestroy()
-    disableKioskRestrictions()
+
+    if (currentInstance === this) {
+      currentInstance = null
+    }
+
+    // Activity destruction is not an admin exit. Android may destroy/recreate the activity for
+    // an update, memory pressure, or an OEM task transition while Lock Mode is still enabled.
+    // Clearing Device Owner policy here creates an unlocked window in exactly those cases.
+    // KioskExitManager performs the explicit teardown before finishing an intentional exit.
+    if (!isKioskEnabled() || blockAutoRelaunch) {
+      disableKioskRestrictions()
+    }
     
     // Stop KioskWatchdogService if kiosk mode was intentionally disabled (#96 fix)
     // This prevents the watchdog from relaunching the app after an intentional exit.

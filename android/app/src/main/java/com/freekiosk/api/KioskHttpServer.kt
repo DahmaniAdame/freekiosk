@@ -7,6 +7,7 @@ import org.json.JSONArray
 import android.util.Log
 import com.freekiosk.ApiUpdateManager
 import com.freekiosk.BuildConfig
+import com.freekiosk.RemoteSettingsStore
 import com.freekiosk.SettingsHistoryStore
 import com.freekiosk.UpdateValidationException
 import java.io.File
@@ -65,11 +66,13 @@ class KioskHttpServer(
         // Route requests
         val isGetOrPost = method == Method.GET || method == Method.POST
 
-        // POST-only endpoints that require a JSON body (GET on these → 405, not 404)
+        // POST-only endpoints (GET on these → 405, not 404)
         val postOnlyUris = setOf(
             "/api/url", "/api/navigate", "/api/tts", "/api/toast",
             "/api/app/launch", "/api/js", "/api/audio/play", "/api/remote/text",
-            "/api/mode", "/api/update"
+            "/api/mode", "/api/update", "/api/autoBrightness/enable",
+            "/api/autoBrightness/disable", "/api/motion/always-on", "/api/exit",
+            "/api/kiosk/exit", "/api/app/kill"
         )
 
         val response = try {
@@ -82,6 +85,8 @@ class KioskHttpServer(
                 isGetOrPost && uri == "/api/info" -> handleGetInfo()
                 isGetOrPost && uri == "/api/health" -> handleHealth()
                 isGetOrPost && uri == "/api/rotation" -> handleGetRotation()
+                isGetOrPost && uri == "/api/autoBrightness" -> handleGetAutoBrightness()
+                isGetOrPost && uri == "/api/motion" -> handleGetMotion()
                 isGetOrPost && uri == "/api/sensors" -> handleGetSensors()
                 isGetOrPost && uri == "/api/storage" -> handleGetStorage()
                 isGetOrPost && uri == "/api/memory" -> handleGetMemory()
@@ -90,6 +95,8 @@ class KioskHttpServer(
                 isGetOrPost && uri == "/api/location" -> handleGetLocation()
                 method == Method.GET && uri == "/api/settings/history" -> handleSettingsHistoryList()
                 method == Method.GET && uri.startsWith("/api/settings/history/") -> handleSettingsHistoryDownload(uri)
+                method == Method.GET && uri == "/api/settings" -> handleGetSettings()
+                method == Method.POST && uri == "/api/settings" -> handleUpdateSettings(session)
                 isGetOrPost && uri == "/" -> handleRoot()
 
                 // Read endpoints that also have a POST variant — POST with body sets, GET/POST without body reads
@@ -110,10 +117,15 @@ class KioskHttpServer(
                 method == Method.POST && uri == "/api/toast" -> handleToast(session)
                 method == Method.POST && uri == "/api/app/launch" -> handleLaunchApp(session)
                 method == Method.POST && uri == "/api/mode" -> handleSetMode(session)
+                method == Method.POST && uri == "/api/autoBrightness/enable" -> handleAutoBrightnessEnable(session)
+                method == Method.POST && uri == "/api/autoBrightness/disable" -> handleAutoBrightnessDisable()
+                method == Method.POST && uri == "/api/motion/always-on" -> handleSetMotionAlwaysOn(session)
                 method == Method.POST && uri == "/api/js" -> handleExecuteJs(session)
                 method == Method.POST && uri == "/api/audio/play" -> handleAudioPlay(session)
                 method == Method.POST && uri == "/api/remote/text" -> handleKeyboardText(session)
                 method == Method.POST && uri == "/api/update" -> handleApkUpdate(session)
+                method == Method.POST && uri in setOf("/api/exit", "/api/kiosk/exit", "/api/app/kill") ->
+                    handleKillApp(session)
 
                 // Control endpoints (accept both GET and POST for convenience)
                 isGetOrPost && uri == "/api/screen/on" -> handleScreenOn()
@@ -150,7 +162,7 @@ class KioskHttpServer(
 
                 // Method Not Allowed: POST-only endpoints called with GET
                 method == Method.GET && uri in postOnlyUris ->
-                    jsonError(Response.Status.METHOD_NOT_ALLOWED, "This endpoint requires POST with a JSON body")
+                    jsonError(Response.Status.METHOD_NOT_ALLOWED, "This endpoint requires POST")
 
                 // 404 only for truly unknown paths
                 else -> jsonError(Response.Status.NOT_FOUND, "Endpoint not found")
@@ -180,6 +192,8 @@ class KioskHttpServer(
                     put("/api/wifi - WiFi info")
                     put("/api/info - Device info")
                     put("/api/rotation - URL rotation status")
+                    put("/api/autoBrightness - Auto-brightness status")
+                    put("/api/motion - Motion detection status")
                     put("/api/sensors - Device sensors (light, proximity)")
                     put("/api/storage - Storage info")
                     put("/api/memory - Memory info")
@@ -190,6 +204,7 @@ class KioskHttpServer(
                     put("/api/location - GPS coordinates (latitude, longitude, accuracy)")
                     put("/api/settings/history - List import-ready settings snapshots")
                     put("/api/settings/history/{id|latest} - Download a settings snapshot")
+                    put("/api/settings - Typed catalog of remotely configurable non-secret settings")
                 })
                 put("POST", JSONArray().apply {
                     put("/api/brightness - Set brightness {value: 0-100}")
@@ -200,10 +215,15 @@ class KioskHttpServer(
                     put("/api/volume - Set volume {value: 0-100}")
                     put("/api/app/launch - Launch app {package: string}")
                     put("/api/mode - Switch display mode {mode: webview|external_app|media_player, url?|package?}")
+                    put("/api/autoBrightness/enable - Enable auto-brightness {min: 0-100, max: 0-100, offset?: 0-100}")
+                    put("/api/autoBrightness/disable - Disable auto-brightness")
+                    put("/api/motion/always-on - Set always-on motion detection {enabled: bool}")
                     put("/api/js - Execute JavaScript {code: string}")
                     put("/api/audio/play - Play audio {url: string, loop: bool, volume: 0-100}")
                     put("/api/remote/text - Type text {text: string}")
                     put("/api/update - Upload a newer signed APK (multipart field: apk)")
+                    put("/api/exit - Persistently exit kiosk and kill FreeKiosk {confirm: true}; API key required")
+                    put("/api/settings - Set or unset typed non-secret settings {set: object, unset: string[]}")
                 })
                 put("GET or POST", JSONArray().apply {
                     put("/api/screen/on - Turn screen on")
@@ -296,7 +316,7 @@ class KioskHttpServer(
         if (apiKey.isNullOrBlank()) {
             return jsonError(
                 Response.Status.FORBIDDEN,
-                "Configure a non-empty API key before using updates or settings history"
+                "Configure a non-empty API key before changing settings, using updates, settings history, or app exit"
             )
         }
         return null
@@ -333,6 +353,42 @@ class KioskHttpServer(
             put("snapshots", SettingsHistoryStore.listSnapshots(appContext))
             put("limit", 30)
         })
+    }
+
+    private fun handleGetSettings(): Response {
+        return try {
+            jsonSuccess(RemoteSettingsStore.catalog(appContext))
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not read remote settings", error)
+            jsonError(Response.Status.INTERNAL_ERROR, "Could not read settings")
+        }
+    }
+
+    private fun handleUpdateSettings(session: IHTTPSession): Response {
+        checkSensitiveControlAllowed()?.let { return it }
+        val body = parseBody(session)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "A JSON body is required")
+        if (body.has("set") && body.optJSONObject("set") == null) {
+            return jsonError(Response.Status.BAD_REQUEST, "set must be a JSON object")
+        }
+        if (body.has("unset") && body.optJSONArray("unset") == null) {
+            return jsonError(Response.Status.BAD_REQUEST, "unset must be an array of setting keys")
+        }
+
+        return try {
+            jsonSuccess(
+                RemoteSettingsStore.update(
+                    appContext,
+                    body.optJSONObject("set") ?: JSONObject(),
+                    body.optJSONArray("unset") ?: JSONArray(),
+                ),
+            )
+        } catch (error: IllegalArgumentException) {
+            jsonError(Response.Status.BAD_REQUEST, error.message ?: "Invalid settings update")
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not update remote settings", error)
+            jsonError(Response.Status.INTERNAL_ERROR, "Could not update settings")
+        }
     }
 
     private fun handleSettingsHistoryDownload(uri: String): Response {
@@ -507,6 +563,88 @@ class KioskHttpServer(
         checkControlAllowed()?.let { return it }
         val result = commandHandler("rotationStop", null)
         return jsonSuccess(result)
+    }
+
+    private fun handleGetAutoBrightness(): Response {
+        val autoBrightness = statusProvider().optJSONObject("autoBrightness") ?: JSONObject().apply {
+            put("enabled", false)
+            put("min", 10)
+            put("max", 100)
+            put("offset", 0)
+            put("currentLightLevel", -1)
+        }
+        return jsonSuccess(autoBrightness)
+    }
+
+    private fun handleAutoBrightnessEnable(session: IHTTPSession): Response {
+        checkControlAllowed()?.let { return it }
+        val body = parseBody(session)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "A JSON body is required")
+        val min = body.optInt("min", 10)
+        val max = body.optInt("max", 100)
+        val offset = body.optInt("offset", 0)
+        if (min !in 0..100 || max !in 0..100 || min > max) {
+            return jsonError(
+                Response.Status.BAD_REQUEST,
+                "min and max must be between 0 and 100, with min less than or equal to max",
+            )
+        }
+        if (offset !in 0..100) {
+            return jsonError(Response.Status.BAD_REQUEST, "offset must be between 0 and 100")
+        }
+
+        val result = commandHandler("autoBrightnessEnable", JSONObject().apply {
+            put("min", min)
+            put("max", max)
+            if (body.has("offset")) put("offset", offset)
+        })
+        return jsonSuccess(result)
+    }
+
+    private fun handleAutoBrightnessDisable(): Response {
+        checkControlAllowed()?.let { return it }
+        return jsonSuccess(commandHandler("autoBrightnessDisable", null))
+    }
+
+    private fun handleGetMotion(): Response {
+        val motion = statusProvider().optJSONObject("motion") ?: JSONObject().apply {
+            put("detected", false)
+            put("alwaysOn", false)
+        }
+        return jsonSuccess(motion)
+    }
+
+    private fun handleSetMotionAlwaysOn(session: IHTTPSession): Response {
+        checkControlAllowed()?.let { return it }
+        val body = parseBody(session)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "A JSON body is required")
+        if (!body.has("enabled") || body.opt("enabled") !is Boolean) {
+            return jsonError(Response.Status.BAD_REQUEST, "enabled must be a boolean")
+        }
+        val enabled = body.getBoolean("enabled")
+        return jsonSuccess(
+            commandHandler("setMotionAlwaysOn", JSONObject().put("value", enabled)),
+        )
+    }
+
+    /**
+     * Emergency escape hatch for a kiosk that cannot be recovered through its UI.
+     * Requiring both an API key and an explicit confirmation prevents browser probes or an
+     * accidental unauthenticated request from shutting down a device.
+     */
+    private fun handleKillApp(session: IHTTPSession): Response {
+        checkSensitiveControlAllowed()?.let { return it }
+        val body = parseBody(session)
+            ?: return jsonError(Response.Status.BAD_REQUEST, "A JSON body is required")
+        if (!body.has("confirm") || body.opt("confirm") != true) {
+            return jsonError(
+                Response.Status.BAD_REQUEST,
+                "Set confirm to true to persistently exit kiosk mode and terminate FreeKiosk",
+            )
+        }
+
+        val result = commandHandler("killApp", null)
+        return jsonResponse(Response.Status.ACCEPTED, result)
     }
 
     // ==================== New Handlers ====================

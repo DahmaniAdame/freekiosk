@@ -47,6 +47,7 @@ import { ScheduledEvent } from '../../types/planner';
 import { ScreenScheduleRule } from '../../types/screenScheduler';
 import { ManagedApp } from '../../types/managedApps';
 import { MediaItem, MediaFitMode, generateMediaItemId, detectMediaType } from '../../types/mediaPlayer';
+import { DEFAULT_WALLPAPER_POSITION, WallpaperPosition } from '../../types/wallpaper';
 import FilePickerModule from '../../utils/FilePickerModule';
 
 const { KioskModule, RotationControlModule, AudioControlModule } = NativeModules;
@@ -122,6 +123,10 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   const [managedApps, setManagedApps] = useState<ManagedApp[]>([]);
   const [externalAppMode, setExternalAppMode] = useState<'single' | 'multi'>('single');
   const [externalAppBackgroundColor, setExternalAppBackgroundColor] = useState<string>('#333');
+  const [externalAppBackgroundImageEnabled, setExternalAppBackgroundImageEnabled] = useState<boolean>(true);
+  const [externalAppBackgroundImage, setExternalAppBackgroundImage] = useState<string>('');
+  const [externalAppBackgroundPosition, setExternalAppBackgroundPosition] = useState<WallpaperPosition>(DEFAULT_WALLPAPER_POSITION);
+  const [pickingWallpaper, setPickingWallpaper] = useState<boolean>(false);
   const [statusBarEnabled, setStatusBarEnabled] = useState<boolean>(false);
   const [statusBarOnOverlay, setStatusBarOnOverlay] = useState<boolean>(true);
   const [statusBarOnReturn, setStatusBarOnReturn] = useState<boolean>(true);
@@ -563,6 +568,12 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     setExternalAppMode(savedExternalAppMode);
     const savedExternalAppBackgroundColor = await StorageService.getExternalAppBackgroundColor();
     setExternalAppBackgroundColor(savedExternalAppBackgroundColor);
+    const savedExternalAppBackgroundImageEnabled = await StorageService.getExternalAppBackgroundImageEnabled();
+    const savedExternalAppBackgroundImage = await StorageService.getExternalAppBackgroundImage();
+    const savedExternalAppBackgroundPosition = await StorageService.getExternalAppBackgroundPosition();
+    setExternalAppBackgroundImageEnabled(savedExternalAppBackgroundImageEnabled);
+    setExternalAppBackgroundImage(savedExternalAppBackgroundImage);
+    setExternalAppBackgroundPosition(savedExternalAppBackgroundPosition);
 
     setOverlayButtonVisible(savedOverlayButtonVisible);
     setPinMaxAttempts(savedPinMaxAttempts);
@@ -821,6 +832,23 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     }
   };
 
+  const handlePickWallpaperFromDevice = async () => {
+    try {
+      setPickingWallpaper(true);
+      const file = await FilePickerModule.pickMedia('image');
+      if (file?.path) {
+        setExternalAppBackgroundImage(file.path);
+        setExternalAppBackgroundImageEnabled(true);
+      }
+    } catch (error: any) {
+      if (error?.code !== 'PICKER_CANCELLED') {
+        Alert.alert('Error', `Failed to pick wallpaper: ${error?.message || error}`);
+      }
+    } finally {
+      setPickingWallpaper(false);
+    }
+  };
+
   const loadInstalledApps = async (): Promise<void> => {
     try {
       setLoadingApps(true);
@@ -879,8 +907,8 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     await StorageService.saveDefaultLauncher(value);
     try {
       if (isDeviceOwner) {
-        // Apply/clear the persistent Device Owner launcher policy immediately.
-        await KioskModule.setDefaultLauncherMode(value);
+        // Store the desired kiosk configuration, but enforce HOME only while Lock Mode is active.
+        await KioskModule.setDefaultLauncherMode(value && kioskEnabled);
       } else if (value) {
         // No Device Owner: send the user to the system Home-app picker to choose FreeKiosk.
         await KioskModule.openAndroidSettings('home');
@@ -1272,6 +1300,13 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
         return;
       }
 
+      const wallpaperUri = externalAppBackgroundImage.trim();
+      if (externalAppBackgroundImageEnabled && wallpaperUri &&
+          !/^(https?:\/\/|file:\/\/|content:\/\/|data:image\/)/i.test(wallpaperUri)) {
+        Alert.alert('Error', 'Wallpaper must use an HTTP(S), file, content, or data-image URI');
+        return;
+      }
+
       if (externalAppMode === 'single') {
         // Single mode: require a package name (classic behavior)
         if (!externalAppPackage) {
@@ -1365,6 +1400,18 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
     }
     setPinMaxAttempts(pinMaxAttemptsNumber);
 
+    if (kioskEnabled) {
+      try {
+        const prepared = await KioskModule.prepareKioskEnable();
+        if (prepared !== true) {
+          throw new Error('Native kiosk preparation was not acknowledged');
+        }
+      } catch (error) {
+        Alert.alert('Error', `Unable to prepare Lock Mode: ${error}`);
+        return;
+      }
+    }
+
     // Save all settings
     if (displayMode === 'webview') {
       await StorageService.saveUrl(finalUrl);
@@ -1441,6 +1488,9 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
         ? normalizedExternalAppBackgroundColor
         : '#333'
     );
+    await StorageService.saveExternalAppBackgroundImageEnabled(externalAppBackgroundImageEnabled);
+    await StorageService.saveExternalAppBackgroundImage(externalAppBackgroundImage);
+    await StorageService.saveExternalAppBackgroundPosition(externalAppBackgroundPosition);
     await StorageService.saveAutoRelaunchApp(autoRelaunchApp);
     await StorageService.saveManagedApps(managedApps);
     await StorageService.saveOverlayButtonVisible(overlayButtonVisible);
@@ -1546,8 +1596,9 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
       await StorageService.saveMediaPlayerMute(mediaPlayerMute);
     }
 
-    // Update accessibility whitelist if device owner
-    if (isDeviceOwner && displayMode === 'external_app') {
+    // Update the accessibility whitelist only while Lock Mode is active. Native lock-task
+    // cleanup restores the unrestricted Android accessibility menu when it is disabled.
+    if (isDeviceOwner && kioskEnabled && displayMode === 'external_app') {
       try {
         const AccessibilityModule = require('../../utils/AccessibilityModule').default;
         const accessibilityPackages = managedApps
@@ -1589,20 +1640,34 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
       }
     }
 
-    // Apply factory-reset restriction independently of Lock Mode (#201). No-op if not Device Owner.
+    // Device Owner restrictions are lifecycle-scoped: preserve the saved choice, but enforce it
+    // only while Lock Mode is active.
     try {
-      await KioskModule.setFactoryResetBlocked(blockFactoryReset);
+      await KioskModule.setFactoryResetBlocked(kioskEnabled && blockFactoryReset);
     } catch (error) {
       console.warn('[Settings] setFactoryResetBlocked error (non-blocking):', error);
+    }
+
+    if (isDeviceOwner) {
+      try {
+        await KioskModule.setDefaultLauncherMode(kioskEnabled && defaultLauncherEnabled);
+      } catch (error) {
+        console.warn('[Settings] setDefaultLauncherMode error (non-blocking):', error);
+      }
     }
 
     // Start/stop lock task
     if (kioskEnabled) {
       try {
         const packageToWhitelist = displayMode === 'external_app' ? externalAppPackage : null;
-        await KioskModule.startLockTask(packageToWhitelist, allowPowerButton, allowNotifications, allowSystemInfo, lockscreenEmergencyCallEnabled);
+        const lockStarted = await KioskModule.startLockTask(packageToWhitelist, allowPowerButton, allowNotifications, allowSystemInfo, lockscreenEmergencyCallEnabled);
+        if (lockStarted !== true) {
+          throw new Error('Android did not confirm Device Owner lock-task mode');
+        }
       } catch (error) {
-        console.warn('[Settings] startLockTask error (non-blocking):', error);
+        console.error('[Settings] startLockTask failed:', error);
+        Alert.alert('Lock Mode failed', `Android did not apply kiosk restrictions: ${error}`);
+        return;
       }
       const message = displayMode === 'external_app'
         ? 'Configuration saved\nLock mode enabled'
@@ -1745,6 +1810,22 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             try {
+              // "Exit Kiosk Mode" is a persistent admin action, not a temporary
+              // unlock. Disable Lock Mode before the native activity is closed so
+              // the watchdog and the next app launch cannot immediately re-lock.
+              await StorageService.saveKioskEnabled(false);
+              setKioskEnabled(false);
+
+              // Clear the active HOME policy so Android returns to its normal launcher, while
+              // retaining the saved preference for the next Lock Mode entry.
+              if (isDeviceOwner) {
+                try {
+                  await KioskModule.setDefaultLauncherMode(false);
+                } catch (launcherError) {
+                  console.warn('Failed to clear default launcher mode during exit:', launcherError);
+                }
+              }
+
               const result = await KioskModule.exitKioskMode();
               if (!result) {
                 Alert.alert('Info', 'Kiosk mode disabled');
@@ -1847,6 +1928,14 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
             onExternalAppModeChange={setExternalAppMode}
             externalAppBackgroundColor={externalAppBackgroundColor}
             onExternalAppBackgroundColorChange={setExternalAppBackgroundColor}
+            externalAppBackgroundImageEnabled={externalAppBackgroundImageEnabled}
+            onExternalAppBackgroundImageEnabledChange={setExternalAppBackgroundImageEnabled}
+            externalAppBackgroundImage={externalAppBackgroundImage}
+            onExternalAppBackgroundImageChange={setExternalAppBackgroundImage}
+            externalAppBackgroundPosition={externalAppBackgroundPosition}
+            onExternalAppBackgroundPositionChange={setExternalAppBackgroundPosition}
+            onPickWallpaper={handlePickWallpaperFromDevice}
+            pickingWallpaper={pickingWallpaper}
             hasOverlayPermission={hasOverlayPermission}
             onRequestOverlayPermission={requestOverlayPermission}
             hasUsageStatsPermission={hasUsageStatsPermission}

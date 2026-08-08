@@ -25,6 +25,7 @@ import type { MediaItem, MediaFitMode } from '../../../types/mediaPlayer';
 import { generateMediaItemId, detectMediaType, isLocalMedia, getMediaDisplayName } from '../../../types/mediaPlayer';
 import FilePickerModule from '../../../utils/FilePickerModule';
 import type { PickedFile } from '../../../utils/FilePickerModule';
+import { WALLPAPER_POSITIONS, WallpaperPosition } from '../../../types/wallpaper';
 
 interface GeneralTabProps {
   // Display mode
@@ -46,6 +47,14 @@ interface GeneralTabProps {
   onExternalAppModeChange: (mode: 'single' | 'multi') => void;
   externalAppBackgroundColor: string;
   onExternalAppBackgroundColorChange: (color: string) => void;
+  externalAppBackgroundImageEnabled: boolean;
+  onExternalAppBackgroundImageEnabledChange: (enabled: boolean) => void;
+  externalAppBackgroundImage: string;
+  onExternalAppBackgroundImageChange: (uri: string) => void;
+  externalAppBackgroundPosition: WallpaperPosition;
+  onExternalAppBackgroundPositionChange: (position: WallpaperPosition) => void;
+  onPickWallpaper: () => void;
+  pickingWallpaper: boolean;
   
   // Managed apps (multi-app mode)
   managedApps: ManagedApp[];
@@ -174,6 +183,14 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
   onExternalAppModeChange,
   externalAppBackgroundColor,
   onExternalAppBackgroundColorChange,
+  externalAppBackgroundImageEnabled,
+  onExternalAppBackgroundImageEnabledChange,
+  externalAppBackgroundImage,
+  onExternalAppBackgroundImageChange,
+  externalAppBackgroundPosition,
+  onExternalAppBackgroundPositionChange,
+  onPickWallpaper,
+  pickingWallpaper,
   managedApps,
   onManagedAppsChange,
   hasOverlayPermission,
@@ -719,6 +736,73 @@ const GeneralTab: React.FC<GeneralTabProps> = ({
                 : undefined}
               hint="Background of the multi-app home screen and external-app return screen"
             />
+
+            <View style={styles.wallpaperDivider} />
+            <SettingsSwitch
+              label="Use Kiosk Wallpaper"
+              value={externalAppBackgroundImageEnabled}
+              onValueChange={onExternalAppBackgroundImageEnabledChange}
+              hint="The background color remains underneath as a fallback"
+            />
+
+            {externalAppBackgroundImageEnabled && (
+              <>
+                <SettingsInput
+                  label="Wallpaper Image URL"
+                  value={externalAppBackgroundImage}
+                  onChangeText={onExternalAppBackgroundImageChange}
+                  placeholder="Bundled wallpaper.png"
+                  autoCapitalize="none"
+                  hint={externalAppBackgroundImage
+                    ? 'HTTP(S), file, or content URI'
+                    : 'Using bundled wallpaper.png'}
+                />
+
+                <View style={styles.wallpaperActions}>
+                  <View style={styles.wallpaperAction}>
+                    <SettingsButton
+                      title={pickingWallpaper ? 'Choosing...' : 'Choose Image'}
+                      icon="monitor"
+                      variant="success"
+                      onPress={onPickWallpaper}
+                      disabled={pickingWallpaper}
+                      loading={pickingWallpaper}
+                    />
+                  </View>
+                  <View style={styles.wallpaperAction}>
+                    <SettingsButton
+                      title="Use Bundled Default"
+                      icon="restore"
+                      variant="outline"
+                      onPress={() => onExternalAppBackgroundImageChange('')}
+                    />
+                  </View>
+                </View>
+
+                <Text style={styles.wallpaperPositionTitle}>Wallpaper position</Text>
+                <Text style={styles.wallpaperPositionHint}>
+                  Select the anchor used when the image is cropped to fill the screen.
+                </Text>
+                <View style={styles.wallpaperPositionGrid}>
+                  {WALLPAPER_POSITIONS.map(position => {
+                    const selected = externalAppBackgroundPosition === position.value;
+                    return (
+                      <TouchableOpacity
+                        key={position.value}
+                        style={[styles.wallpaperPositionButton, selected && styles.wallpaperPositionButtonSelected]}
+                        onPress={() => onExternalAppBackgroundPositionChange(position.value)}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected }}
+                      >
+                        <Text style={[styles.wallpaperPositionText, selected && styles.wallpaperPositionTextSelected]}>
+                          {position.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
           </SettingsSection>
           
           {/* Single App: classic package name + picker */}
@@ -1112,6 +1196,57 @@ const styles = StyleSheet.create({
   },
   rotationSpacer: {
     height: Spacing.md,
+  },
+  wallpaperDivider: {
+    height: 1,
+    backgroundColor: Colors.borderLight,
+    marginVertical: Spacing.lg,
+  },
+  wallpaperActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginBottom: Spacing.lg,
+  },
+  wallpaperAction: {
+    flex: 1,
+  },
+  wallpaperPositionTitle: {
+    ...Typography.label,
+    color: Colors.textPrimary,
+    marginBottom: 4,
+  },
+  wallpaperPositionHint: {
+    ...Typography.hint,
+    marginBottom: Spacing.sm,
+  },
+  wallpaperPositionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.sm,
+  },
+  wallpaperPositionButton: {
+    width: '31%',
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    backgroundColor: Colors.surface,
+  },
+  wallpaperPositionButtonSelected: {
+    borderColor: Colors.primary,
+    backgroundColor: '#E3F2FD',
+  },
+  wallpaperPositionText: {
+    ...Typography.hint,
+    color: Colors.textSecondary,
+    textAlign: 'center',
+  },
+  wallpaperPositionTextSelected: {
+    color: Colors.primary,
+    fontWeight: '700',
   },
   mediaItemCard: {
     backgroundColor: Colors.surfaceVariant,

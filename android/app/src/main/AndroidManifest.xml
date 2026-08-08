@@ -124,12 +124,23 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
-        <intent-filter>
+      </activity>
+
+      <!-- Enabled only while Device Owner default-launcher mode is active. Keeping
+           HOME separate from MainActivity lets an intentional kiosk exit remove
+           FreeKiosk from Home resolution without disabling its normal app icon. -->
+      <activity-alias
+        android:name=".KioskHomeActivity"
+        android:targetActivity=".MainActivity"
+        android:label="@string/app_name"
+        android:exported="true"
+        android:enabled="false">
+        <intent-filter android:priority="1000">
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
             <category android:name="android.intent.category.DEFAULT" />
         </intent-filter>
-      </activity>
+      </activity-alias>
 
       <!-- Device Admin Receiver pour le mode kiosk -->
       <receiver

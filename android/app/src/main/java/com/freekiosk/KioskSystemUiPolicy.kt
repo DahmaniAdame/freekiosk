@@ -24,10 +24,11 @@ object KioskSystemUiPolicy {
     private const val KIOSK_POLICY = "immersive.full=*"
 
     fun enable(context: Context): Boolean {
+        val wafTaskbarSuppressed = WafTaskbarPolicy.hideForKiosk(context)
         if (context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) !=
             PackageManager.PERMISSION_GRANTED) {
             DebugLog.d(TAG, "WRITE_SECURE_SETTINGS unavailable; relying on lock task for navigation UI")
-            return false
+            return wafTaskbarSuppressed
         }
 
         return try {
@@ -52,13 +53,16 @@ object KioskSystemUiPolicy {
             true
         } catch (e: Exception) {
             DebugLog.d(TAG, "Could not enable global navigation immersive policy: ${e.message}")
-            false
+            wafTaskbarSuppressed
         }
     }
 
     fun restore(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_APPLIED, false)) return
+        if (!prefs.getBoolean(KEY_APPLIED, false)) {
+            WafTaskbarPolicy.restoreAfterKiosk(context)
+            return
+        }
 
         try {
             if (prefs.getBoolean(KEY_HAD_PREVIOUS, false)) {
@@ -84,6 +88,7 @@ object KioskSystemUiPolicy {
             DebugLog.d(TAG, "Could not restore global navigation policy: ${e.message}")
         } finally {
             prefs.edit().clear().apply()
+            WafTaskbarPolicy.restoreAfterKiosk(context)
         }
     }
 }
