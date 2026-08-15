@@ -5,6 +5,7 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="100"
     android:canRetrieveWindowContent="true"
+    android:canRequestFilterKeyEvents="true"
     android:settingsActivity="com.freekiosk.MainActivity"
-    android:accessibilityFlags="flagDefault|flagInputMethodEditor"
+    android:accessibilityFlags="flagDefault|flagInputMethodEditor|flagRequestFilterKeyEvents"
     android:isAccessibilityTool="true" />

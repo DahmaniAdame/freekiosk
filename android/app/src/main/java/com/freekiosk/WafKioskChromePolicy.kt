@@ -13,11 +13,11 @@ import android.util.Log
  * The OEM side menus and the Launcher3 taskbar are controlled by different systems. Applying
  * them from unrelated callbacks allowed one policy to succeed while the other was not ready yet,
  * leaving a half-hidden kiosk. Child-facing kiosk UI uses a single, periodically reconciled
- * policy; PIN and Settings restore both pieces together.
+ * policy. PIN and authenticated FreeKiosk Settings retain it; only an explicit Lock Mode exit
+ * restores Android/OEM chrome.
  */
 object WafKioskChromePolicy {
     private const val TAG = "WafKioskChromePolicy"
-    private const val WAF_CONTROLLER_AUTHORITY = "com.xbh.navisetting.controller"
     private const val RECONCILE_INTERVAL_MS = 2_000L
 
     private val handler = Handler(Looper.getMainLooper())
@@ -38,14 +38,14 @@ object WafKioskChromePolicy {
      * Switch the complete WAF chrome policy for the current FreeKiosk route.
      *
      * `true` means the kiosk itself or an allowed external app is child-facing. `false` means
-     * the administrator PIN/Settings UI (or Lock Mode exit) is active.
+     * Lock Mode has explicitly exited.
      */
     @Synchronized
     fun setChildFacingActive(context: Context, active: Boolean): Boolean {
         val appContext = context.applicationContext
         handler.removeCallbacks(reconcileRunnable)
 
-        if (!isSamsungWaf(appContext)) {
+        if (!SamsungWafDevice.isWaf(appContext)) {
             childFacingActive = false
             applicationContext = null
             return false
@@ -97,7 +97,30 @@ object WafKioskChromePolicy {
             Log.w(TAG, "Could not enforce WAF taskbar policy: ${error.message}")
         }.getOrDefault(false)
 
-        return sideMenusHidden && taskbarHidden
+        val edgeGesturesBlocked = runCatching {
+            WafEdgeGesturePolicy.blockForKiosk(context)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not enforce WAF edge-gesture policy: ${error.message}")
+        }.getOrDefault(false)
+
+        val desktopWindowingBlocked = runCatching {
+            WafWindowingPolicy.blockForKiosk(context)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not enforce WAF desktop-windowing policy: ${error.message}")
+        }.getOrDefault(false)
+
+        val accessibilitySafetyReady = runCatching {
+            FreeKioskAccessibilityService.isRunning() ||
+                FreeKioskAccessibilityService.ensureEnabledForDeviceOwner(context)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not enable WAF accessibility safety service: ${error.message}")
+        }.getOrDefault(false)
+
+        return sideMenusHidden &&
+            taskbarHidden &&
+            edgeGesturesBlocked &&
+            desktopWindowingBlocked &&
+            accessibilitySafetyReady
     }
 
     private fun restoreOnce(context: Context): Boolean {
@@ -117,9 +140,22 @@ object WafKioskChromePolicy {
             Log.w(TAG, "Could not restore WAF taskbar policy: ${error.message}")
         }.getOrDefault(false)
 
-        return sideMenusRestored || taskbarRestored
+        val edgeGesturesRestored = runCatching {
+            WafEdgeGesturePolicy.restoreAfterKiosk(context)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not restore WAF edge-gesture policy: ${error.message}")
+        }.getOrDefault(false)
+
+        val desktopWindowingRestored = runCatching {
+            WafWindowingPolicy.restoreAfterKiosk(context)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not restore WAF desktop-windowing policy: ${error.message}")
+        }.getOrDefault(false)
+
+        return sideMenusRestored ||
+            taskbarRestored ||
+            edgeGesturesRestored ||
+            desktopWindowingRestored
     }
 
-    private fun isSamsungWaf(context: Context): Boolean =
-        context.packageManager.resolveContentProvider(WAF_CONTROLLER_AUTHORITY, 0) != null
 }

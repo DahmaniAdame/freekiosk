@@ -24,7 +24,6 @@ import android.util.Log
  */
 object WafTaskbarPolicy {
     private const val TAG = "WafTaskbarPolicy"
-    private const val WAF_CONTROLLER_AUTHORITY = "com.xbh.navisetting.controller"
     private const val PREFS_NAME = "FreeKioskLifecyclePolicies"
     private const val KEY_APPLIED = "waf_taskbar_density_applied"
     private const val KEY_HAD_OVERRIDE = "waf_taskbar_had_density_override"
@@ -45,7 +44,7 @@ object WafTaskbarPolicy {
     )
 
     fun hideForKiosk(context: Context): Boolean {
-        if (!isSamsungWaf(context)) return false
+        if (!SamsungWafDevice.isWaf(context)) return false
         if (context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -133,9 +132,6 @@ object WafTaskbarPolicy {
         }
         return restored
     }
-
-    private fun isSamsungWaf(context: Context): Boolean =
-        context.packageManager.resolveContentProvider(WAF_CONTROLLER_AUTHORITY, 0) != null
 
     private fun getWindowManagerBinder(context: Context): IBinder? = runCatching {
         // Apps cannot discover WindowManagerService through the command-line ServiceManager

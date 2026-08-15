@@ -90,7 +90,6 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   const countdownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [keyboardMode, setKeyboardMode] = useState<string>('default');
   const [allowPowerButton, setAllowPowerButton] = useState<boolean>(false);
-  const [allowNotifications, setAllowNotifications] = useState<boolean>(false);
   const appStateRef = useRef(AppState.currentState);
   const appLaunchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isNavigatingToPinRef = useRef<boolean>(false); // Guard to prevent relaunch during 5-tap→PIN navigation
@@ -120,8 +119,6 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   const [returnTapTimeout, setReturnTapTimeout] = useState<number>(1500);
   const [returnMode, setReturnMode] = useState<string>('tap_anywhere');
   const [returnButtonPosition, setReturnButtonPosition] = useState<string>('bottom-right');
-  const [kioskHomeButtonEnabled, setKioskHomeButtonEnabled] = useState<boolean>(true);
-  const [kioskHomeButtonPosition, setKioskHomeButtonPosition] = useState<string>('bottom-left');
   
   // URL Rotation states
   const [urlRotationEnabled, setUrlRotationEnabled] = useState<boolean>(false);
@@ -243,6 +240,14 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
         // If navigateToPin is in progress, skip all relaunch logic
         if (isNavigatingToPinRef.current) {
           console.log('[KioskScreen] AppState: skipping relaunch (navigateToPin in progress)');
+          return;
+        }
+
+        // Native admin-session state is authoritative across PIN/Settings route
+        // transitions. Never let a stale AppState callback reopen a child app over
+        // an authenticated administrator.
+        if (await KioskModule.isAdminSessionActive()) {
+          console.log('[KioskScreen] AppState: skipping relaunch (admin session active)');
           return;
         }
 
@@ -986,6 +991,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
   // here and never while the user is inside Pin/Settings. Revert: delete this block.
   useFocusEffect(
     useCallback(() => {
+      KioskModule.setAdminSessionActive(false).catch(() => {});
       KioskModule.setKioskScreenActive?.(true).catch(() => {});
       return () => {
         KioskModule.setKioskScreenActive?.(false).catch(() => {});
@@ -1545,7 +1551,6 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       const savedKeyboardMode = str(K.KEYBOARD_MODE) ?? 'default';
       const savedAllowPowerButton = bool(K.ALLOW_POWER_BUTTON, true);
       const savedBlockFactoryReset = bool(K.BLOCK_FACTORY_RESET, false);
-      const savedAllowNotifications = bool(K.ALLOW_NOTIFICATIONS, false);
       const savedAllowSystemInfo = bool(K.ALLOW_SYSTEM_INFO, false);
 
       setDisplayMode(savedDisplayMode);
@@ -1555,7 +1560,6 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       setBackButtonTimerDelay(savedBackButtonTimerDelay);
       setKeyboardMode(savedKeyboardMode);
       setAllowPowerButton(savedAllowPowerButton);
-      setAllowNotifications(savedAllowNotifications);
 
       // Reconcile factory-reset restriction with the stored toggle on every launch (#201),
       // independently of Lock Mode. No-op natively if not Device Owner.
@@ -1596,15 +1600,11 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
       const savedReturnTapTimeout = num(K.RETURN_TAP_TIMEOUT, 1500);
       const savedReturnMode = str(K.RETURN_MODE) ?? 'tap_anywhere';
       const savedReturnButtonPosition = str(K.RETURN_BUTTON_POSITION) ?? 'bottom-right';
-      const savedKioskHomeButtonEnabled = bool(K.KIOSK_HOME_BUTTON_ENABLED, true);
-      const savedKioskHomeButtonPosition = str(K.KIOSK_HOME_BUTTON_POSITION) ?? 'bottom-left';
       setReturnButtonVisible(savedReturnButtonVisible);
       setReturnTapCount(savedReturnTapCount);
       setReturnTapTimeout(savedReturnTapTimeout);
       setReturnMode(savedReturnMode);
       setReturnButtonPosition(savedReturnButtonPosition);
-      setKioskHomeButtonEnabled(savedKioskHomeButtonEnabled);
-      setKioskHomeButtonPosition(savedKioskHomeButtonPosition);
       
       // Load URL Rotation settings
       const savedUrlRotationEnabled = bool(K.URL_ROTATION_ENABLED, false);
@@ -1839,7 +1839,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
         try {
           // Pass external app package so it gets added to whitelist
           const packageToWhitelist = savedDisplayMode === 'external_app' && savedExternalAppPackage ? savedExternalAppPackage : undefined;
-          await KioskModule.startLockTask(packageToWhitelist, savedAllowPowerButton, savedAllowNotifications, savedAllowSystemInfo, savedEmergencyEnabled);
+          await KioskModule.startLockTask(packageToWhitelist, savedAllowPowerButton, false, savedAllowSystemInfo, savedEmergencyEnabled);
         } catch {
           // Silent fail
         }
@@ -1879,22 +1879,6 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
         // would trigger onResume() fast-path → double-launch loop (#launchOnBoot-loop).
         if (!bootAppsLaunchedRef.current) {
           bootAppsLaunchedRef.current = true;
-          // Start OverlayService BEFORE launching boot apps so kiosk protection is
-          // active from the moment the boot app appears in foreground — preventing
-          // the user from navigating outside authorized apps during the launch window.
-          // Only for single-app mode; multi-app grid has its own protection.
-          if (savedExternalAppMode === 'single' && savedExternalAppPackage) {
-            try {
-              await OverlayServiceModule.startOverlayService(
-                savedReturnTapCount, savedReturnTapTimeout, savedReturnMode,
-                savedReturnButtonPosition, savedExternalAppPackage,
-                autoRelaunchApp, allowNotifications,
-                savedKioskHomeButtonEnabled, savedKioskHomeButtonPosition
-              );
-            } catch (e) {
-              console.warn('[KioskScreen] Failed to pre-start overlay before boot apps:', e);
-            }
-          }
           try {
             const bootCount = await AppLauncherModule.launchBootApps();
             if (bootCount > 0) {
@@ -1946,7 +1930,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
             return;
           }
           console.log('[KioskScreen] Launching external app:', savedExternalAppPackage);
-          await launchExternalApp(savedExternalAppPackage, savedReturnTapCount, savedReturnTapTimeout, savedReturnMode, savedReturnButtonPosition);
+          await launchExternalApp(savedExternalAppPackage);
         } else if (savedExternalAppMode === 'multi') {
           // Multi-app mode: sync overlay settings for when user launches an app from grid
           const savedTestMode = bool(K.EXTERNAL_APP_TEST_MODE, true);
@@ -1971,7 +1955,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
               }
               return;
             }
-            await launchExternalApp(soleApp.packageName, savedReturnTapCount, savedReturnTapTimeout, savedReturnMode, savedReturnButtonPosition);
+            await launchExternalApp(soleApp.packageName);
           } else {
             console.log('[KioskScreen] Multi-app mode: showing app grid (' + homeScreenApps.length + ' apps)');
           }
@@ -2429,7 +2413,7 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
     }
   };
 
-  const launchExternalApp = async (packageName: string, tapCount?: number, tapTimeout?: number, mode?: string, buttonPos?: string): Promise<void> => {
+  const launchExternalApp = async (packageName: string): Promise<void> => {
     try {
       const isInstalled = await AppLauncherModule.isAppInstalled(packageName);
       if (!isInstalled) {
@@ -2437,31 +2421,8 @@ const KioskScreen: React.FC<KioskScreenProps> = ({ navigation }) => {
         return;
       }
 
-      // Use provided values or fall back to state
-      const finalTapCount = tapCount ?? returnTapCount;
-      const finalTapTimeout = tapTimeout ?? returnTapTimeout;
-      const finalReturnMode = mode ?? returnMode;
-      const finalButtonPosition = buttonPos ?? returnButtonPosition;
-
-      // Start OverlayService BEFORE launching the external app
-      try {
-        await OverlayServiceModule.startOverlayService(
-          finalTapCount, 
-          finalTapTimeout, 
-          finalReturnMode, 
-          finalButtonPosition,
-          packageName, // Pass locked package for monitoring
-          autoRelaunchApp, // Pass auto-relaunch setting
-          allowNotifications, // Pass NFC enabled flag for monitoring filter
-          kioskHomeButtonEnabled,
-          kioskHomeButtonPosition
-        );
-        console.log(`[KioskScreen] OverlayService started with tapCount=${finalTapCount}, tapTimeout=${finalTapTimeout}, mode=${finalReturnMode}, position=${finalButtonPosition}, package=${packageName}, autoRelaunch=${autoRelaunchApp}, nfcEnabled=${allowNotifications}`);
-      } catch (overlayError) {
-        console.warn('[KioskScreen] Failed to start overlay service:', overlayError);
-        // Continue anyway — the external app can still be launched
-      }
-
+      // Native launch atomically verifies Device Owner LOCKED state, records this exact
+      // process-scoped selection, starts the return/admin overlay, then opens the app.
       await AppLauncherModule.launchExternalApp(packageName);
       setIsAppLaunched(true);
     } catch (error) {

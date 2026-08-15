@@ -1,6 +1,8 @@
 import { NativeModules } from 'react-native';
 
 interface KioskModuleInterface {
+  setAlwaysOnWirelessDebug(enabled: boolean): Promise<WirelessDebugStatus>;
+  getAlwaysOnWirelessDebugStatus(): Promise<WirelessDebugStatus>;
   exitKioskMode(): Promise<boolean>;
   prepareKioskEnable(): Promise<boolean>;
   startLockTask(externalAppPackage?: string | null, allowPowerButton?: boolean, allowNotifications?: boolean, allowSystemInfo?: boolean, allowEmergencyCall?: boolean): Promise<boolean>;
@@ -47,12 +49,27 @@ interface KioskModuleInterface {
   bringToFront(): Promise<boolean>;
   // #180 — Gate the native tap-to-settings fallback to the kiosk screen only
   setKioskScreenActive(active: boolean): Promise<boolean>;
+  // Every FreeKiosk route hides system/OEM chrome until explicit Lock Mode exit.
+  setKioskChromeActive(active: boolean): Promise<boolean>;
+  // PIN/Settings suspend every external-app relaunch path until Kiosk is focused again.
+  setAdminSessionActive(active: boolean): Promise<boolean>;
+  isAdminSessionActive(): Promise<boolean>;
   // #135 — Dismiss the soft keyboard at the window level (works for WebView inputs too)
   hideKeyboard(): Promise<boolean>;
   // #177 — Pause/resume the content WebView's renderer (stops background audio/video).
   // tag is the React node handle of the WebView (from findNodeHandle).
   pauseWebView(tag: number): Promise<boolean>;
   resumeWebView(tag: number): Promise<boolean>;
+}
+
+export interface WirelessDebugStatus {
+  configured: boolean;
+  deviceOwner: boolean;
+  writeSecureSettings: boolean;
+  adbEnabled: boolean;
+  wirelessDebugEnabled: boolean;
+  legacyPort5555Active: boolean;
+  error: string | null;
 }
 
 const { KioskModule } = NativeModules;

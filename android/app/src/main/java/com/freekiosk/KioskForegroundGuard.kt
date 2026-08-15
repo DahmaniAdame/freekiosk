@@ -30,6 +30,30 @@ object KioskForegroundGuard {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val temporaryAllowedPackages = ConcurrentHashMap<String, Long>()
 
+    /**
+     * The selected child app is intentionally process-scoped.
+     *
+     * Persisting this value made a package selected before a reboot/process death become
+     * the recovery target after restart. The accessibility service and watchdog would then
+     * reject FreeKiosk itself and continuously reopen that stale package before MainActivity
+     * could restore lock task. Losing this volatile value now fails closed to the trusted
+     * FreeKiosk home, where lock task is repaired before another app can be selected.
+     */
+    @Volatile
+    private var activeKioskPackage: String? = null
+
+    /**
+     * True while FreeKiosk is showing the PIN or authenticated administration UI.
+     *
+     * This is deliberately process-scoped. A process restart cannot restore an
+     * authenticated admin session and therefore fails closed to the kiosk home.
+     */
+    @Volatile
+    private var adminSessionActive = false
+
+    @Volatile
+    private var legacyPersistedStateCleared = false
+
     @Volatile
     private var lastUserFacingPackage: String? = null
 
@@ -59,7 +83,15 @@ object KioskForegroundGuard {
         className: String? = null
     ): Boolean {
         val activePackage = getActiveKioskPackage(context)
-        if (packageName == context.packageName) return activePackage == null
+
+        // FreeKiosk is the trusted recovery/home task. Rejecting it while an external app
+        // was selected creates a self-recovery loop and can prevent lock task restoration.
+        if (packageName == context.packageName) return true
+
+        // No external or system task is child-facing while the primary Device Owner
+        // boundary is down. This turns every partial-lock state into a deterministic
+        // recovery to FreeKiosk instead of a permissive accessibility-only kiosk.
+        if (!isStrictLockTaskActive(context)) return false
 
         val temporaryAllowedUntil = temporaryAllowedPackages[packageName]
         if (temporaryAllowedUntil != null) {
@@ -123,27 +155,75 @@ object KioskForegroundGuard {
      */
     fun authorizeKioskLaunch(context: Context, packageName: String) {
         if (packageName.isBlank() || packageName == context.packageName) return
+        clearLegacyPersistedState(context)
+        adminSessionActive = false
+        activeKioskPackage?.takeIf { it != packageName }?.let(temporaryAllowedPackages::remove)
+        activeKioskPackage = packageName
         temporaryAllowedPackages[packageName] = System.currentTimeMillis() + 15_000L
         lastUserFacingPackage = packageName
-        context.getSharedPreferences(ACTIVE_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putString(ACTIVE_PACKAGE_KEY, packageName)
-            .apply()
     }
 
     fun clearActiveKioskPackage(context: Context) {
-        getActiveKioskPackage(context)?.let(temporaryAllowedPackages::remove)
+        clearLegacyPersistedState(context)
+        activeKioskPackage?.let(temporaryAllowedPackages::remove)
+        activeKioskPackage = null
         lastUserFacingPackage = null
-        context.getSharedPreferences(ACTIVE_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .remove(ACTIVE_PACKAGE_KEY)
-            .apply()
     }
 
     fun getActiveKioskPackage(context: Context): String? {
-        return context.getSharedPreferences(ACTIVE_PREFS, Context.MODE_PRIVATE)
-            .getString(ACTIVE_PACKAGE_KEY, null)
-            ?.takeIf { it.isNotBlank() }
+        clearLegacyPersistedState(context)
+        return activeKioskPackage
+    }
+
+    fun beginAdminSession(context: Context) {
+        adminSessionActive = true
+        clearActiveKioskPackage(context)
+    }
+
+    fun endAdminSession(context: Context) {
+        clearLegacyPersistedState(context)
+        adminSessionActive = false
+    }
+
+    fun isAdminSessionActive(): Boolean = adminSessionActive
+
+    /** The custom overlay is the only authorized close path for an active child app. */
+    fun shouldConsumeSystemNavigation(context: Context): Boolean {
+        val activePackage = getActiveKioskPackage(context) ?: return false
+        return !adminSessionActive &&
+            activePackage != context.packageName &&
+            isStrictLockTaskActive(context)
+    }
+
+    /** True only for fully managed Device Owner lock task, never ordinary screen pinning. */
+    fun isStrictLockTaskActive(context: Context): Boolean {
+        return try {
+            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            val activityManager =
+                context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            dpm.isDeviceOwnerApp(context.packageName) &&
+                activityManager.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_LOCKED
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Native services may only reopen the currently selected app while Android's strict
+     * lock-task boundary is already active and that package is in the Device Owner allowlist.
+     */
+    fun canRelaunchActiveExternalPackage(context: Context, packageName: String): Boolean {
+        if (adminSessionActive) return false
+        if (packageName.isBlank() || packageName != getActiveKioskPackage(context)) return false
+        if (!isStrictLockTaskActive(context)) return false
+
+        return try {
+            val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            val admin = ComponentName(context, DeviceAdminReceiver::class.java)
+            dpm.getLockTaskPackages(admin).contains(packageName)
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Permit a tightly-scoped native system workflow, such as Wi-Fi confirmation. */
@@ -171,6 +251,31 @@ object KioskForegroundGuard {
             return
         }
 
+        // Accessibility events can be attributed to a rendering/helper package even
+        // though that package never became the foreground Activity (for example the
+        // Android text-classifier service while typing the admin PIN). Acting on such
+        // an event sends GLOBAL_BACK into FreeKiosk and can close PIN/Settings. Only
+        // enforce the event when its owner is actually the top Activity.
+        val actualTopPackage = getTopRunningPackage(service)
+        if (actualTopPackage != null &&
+            actualTopPackage != packageName &&
+            isAllowedForeground(service, actualTopPackage)) {
+            // Never inject Back into the allowed Activity underneath a transient SystemUI,
+            // helper, or FreeKiosk overlay window. That used to finish the child app.
+            KioskSystemUiPolicy.enable(service)
+            if (packageName == "com.android.systemui" &&
+                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                try {
+                    service.performGlobalAction(
+                        AccessibilityService.GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE
+                    )
+                } catch (_: Exception) {
+                }
+            }
+            Log.d(TAG, "Ignored non-foreground window event: $packageName (top=$actualTopPackage)")
+            return
+        }
+
         Log.w(TAG, "Blocked window: $packageName/${className.orEmpty()}")
 
         // Pop the unauthorized activity first so the active app's state remains intact.
@@ -194,8 +299,20 @@ object KioskForegroundGuard {
 
         val activePackage = getActiveKioskPackage(context)
         val targetPackage = activePackage
+            ?.takeIf { canRelaunchActiveExternalPackage(context, it) }
             ?.takeIf { context.packageManager.getLaunchIntentForPackage(it) != null }
             ?: context.packageName
+
+        // Avoid delivering CLEAR_TOP to the already-visible FreeKiosk activity. In a
+        // single-Activity React Native app that can reset the navigation stack and eject
+        // an authenticated administrator from Settings even though no escape occurred.
+        if (getTopRunningPackage(context) == targetPackage) return false
+
+        if (targetPackage == context.packageName && activePackage != null) {
+            // The security boundary was lost or the selection became invalid. Never keep
+            // retrying the child app; return to FreeKiosk and let MainActivity repair it.
+            clearActiveKioskPackage(context)
+        }
 
         return try {
             val intent = if (targetPackage == context.packageName) {
@@ -283,6 +400,17 @@ object KioskForegroundGuard {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun getTopRunningPackage(context: Context): String? {
+        return try {
+            val activityManager =
+                context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            activityManager.getRunningTasks(1).firstOrNull()?.topActivity?.packageName
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun readStorageValue(context: Context, key: String, defaultValue: String): String {
         var database: SQLiteDatabase? = null
         return try {
@@ -301,6 +429,19 @@ object KioskForegroundGuard {
             defaultValue
         } finally {
             database?.close()
+        }
+    }
+
+    /** Remove the stale state written by versions through 1.2.41 exactly once per process. */
+    private fun clearLegacyPersistedState(context: Context) {
+        if (legacyPersistedStateCleared) return
+        synchronized(this) {
+            if (legacyPersistedStateCleared) return
+            context.getSharedPreferences(ACTIVE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(ACTIVE_PACKAGE_KEY)
+                .apply()
+            legacyPersistedStateCleared = true
         }
     }
 }

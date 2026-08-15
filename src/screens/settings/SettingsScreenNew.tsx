@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import CookieManager from '@react-native-cookies/cookies';
 import { Camera } from 'react-native-vision-camera';
+import { useFocusEffect } from '@react-navigation/native';
 import { StorageService } from '../../utils/storage';
 import { saveSecurePin, hasSecurePin, clearSecurePin, saveSecureBasicAuthPassword, getSecureBasicAuthPassword } from '../../utils/secureStorage';
 import CertificateModuleTyped, { CertificateInfo } from '../../utils/CertificateModule';
@@ -73,6 +74,17 @@ const TABS: { id: string; label: string; icon: IconName }[] = [
 const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
   // Active tab
   const [activeTab, setActiveTab] = useState('general');
+
+  // Authentication grants access to FreeKiosk administration, not to Android. Keep every
+  // system/OEM surface suppressed until the administrator explicitly exits Lock Mode.
+  useFocusEffect(
+    useCallback(() => {
+      if (hasSettingsAccess()) {
+        KioskModule.setAdminSessionActive?.(true).catch(() => {});
+        KioskModule.setKioskChromeActive?.(true).catch(() => {});
+      }
+    }, []),
+  );
   
   // All state from original SettingsScreen
   const [url, setUrl] = useState<string>('');
@@ -1620,21 +1632,10 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
         await OverlayServiceModule.setStatusBarEnabled(statusBarEnabled && statusBarOnOverlay);
         await OverlayServiceModule.setStatusBarItems(showBattery, showWifi, showBluetooth, showVolume, showTime);
         
-        // Restart OverlayService with new settings
-        const finalTapCount = isNaN(tapCount) ? 5 : Math.max(2, Math.min(20, tapCount));
-        const finalTapTimeout = isNaN(tapTimeout) ? 1500 : Math.max(500, Math.min(5000, tapTimeout));
+        // Settings is an admin surface, not an authenticated child-app session. Leave the
+        // external overlay stopped here; the native launcher starts it atomically after
+        // strict lock-task verification when the user returns to a configured app.
         await OverlayServiceModule.stopOverlayService();
-        await OverlayServiceModule.startOverlayService(
-          finalTapCount, 
-          finalTapTimeout, 
-          returnMode, 
-          returnButtonPosition,
-          externalAppPackage,
-          autoRelaunchApp,
-          allowNotifications,
-          kioskHomeButtonEnabled,
-          kioskHomeButtonPosition
-        );
       } catch (error) {
         // Silent fail
       }
@@ -2046,7 +2047,13 @@ const SettingsScreenNew: React.FC<SettingsScreenProps> = ({ navigation }) => {
             onBasicAuthUsernameChange={setBasicAuthUsername}
             basicAuthPassword={basicAuthPassword}
             onBasicAuthPasswordChange={setBasicAuthPassword}
-            onBackToKiosk={() => { revokeSettingsAccess(); navigation.reset({ index: 0, routes: [{ name: 'Kiosk' }] }); }}
+            onBackToKiosk={async () => {
+              // End the native admin gate before the grid becomes interactive. Waiting for
+              // a navigation focus callback left a race where the first app tap was rejected.
+              await KioskModule.setAdminSessionActive(false).catch(() => {});
+              revokeSettingsAccess();
+              navigation.reset({ index: 0, routes: [{ name: 'Kiosk' }] });
+            }}
           />
         );
       

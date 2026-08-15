@@ -5,10 +5,12 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, AppState, NativeModules } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   SettingsSection,
   SettingsButton,
   SettingsInfoBox,
+  SettingsSwitch,
   BackupRestoreSection,
 } from '../../../components/settings';
 import { ApiSettingsSection } from '../../../components/ApiSettingsSection';
@@ -16,6 +18,7 @@ import { MqttSettingsSection } from '../../../components/MqttSettingsSection';
 import { CertificateInfo } from '../../../utils/CertificateModule';
 import AccessibilityModule from '../../../utils/AccessibilityModule';
 import { Colors, Spacing, Typography } from '../../../theme';
+import type { WirelessDebugStatus } from '../../../utils/KioskModule';
 
 const { KioskModule } = NativeModules;
 
@@ -74,6 +77,8 @@ const AdvancedTab: React.FC<AdvancedTabProps> = ({
 }) => {
   const [accessibilityEnabled, setAccessibilityEnabled] = useState(false);
   const [accessibilityRunning, setAccessibilityRunning] = useState(false);
+  const [alwaysOnWirelessDebug, setAlwaysOnWirelessDebug] = useState(true);
+  const [wirelessDebugStatus, setWirelessDebugStatus] = useState<WirelessDebugStatus | null>(null);
 
   const checkAccessibilityStatus = useCallback(async () => {
     try {
@@ -96,6 +101,40 @@ const AdvancedTab: React.FC<AdvancedTabProps> = ({
     });
     return () => subscription.remove();
   }, [checkAccessibilityStatus]);
+
+  useEffect(() => {
+    const loadWirelessDebugSetting = async () => {
+      try {
+        const stored = await AsyncStorage.getItem('@kiosk_keep_wireless_debug');
+        const enabled = stored === null ? true : stored === 'true';
+        setAlwaysOnWirelessDebug(enabled);
+        if (stored === null) {
+          await AsyncStorage.setItem('@kiosk_keep_wireless_debug', 'true');
+        }
+        const status = enabled
+          ? await KioskModule.setAlwaysOnWirelessDebug(true)
+          : await KioskModule.getAlwaysOnWirelessDebugStatus();
+        setWirelessDebugStatus(status);
+      } catch {
+        // The native policy is Android-only. Keep Settings usable on other platforms.
+      }
+    };
+    loadWirelessDebugSetting();
+  }, []);
+
+  const handleAlwaysOnWirelessDebugChange = async (enabled: boolean) => {
+    try {
+      const status: WirelessDebugStatus = await KioskModule.setAlwaysOnWirelessDebug(enabled);
+      await AsyncStorage.setItem('@kiosk_keep_wireless_debug', enabled.toString());
+      setAlwaysOnWirelessDebug(enabled);
+      setWirelessDebugStatus(status);
+      if (status.error) {
+        Alert.alert('Wireless debugging', status.error);
+      }
+    } catch (e: any) {
+      Alert.alert('Wireless debugging', e.message || 'Unable to update the debugging policy.');
+    }
+  };
 
   const handleOpenAccessibilitySettings = async () => {
     try {
@@ -301,6 +340,34 @@ const AdvancedTab: React.FC<AdvancedTabProps> = ({
 
       {/* Backup & Restore */}
       <BackupRestoreSection onRestoreComplete={onRestoreComplete} />
+
+      {/* Android System Settings */}
+      {isDeviceOwner && (
+      <SettingsSection title="Remote ADB Access" icon="web">
+        <SettingsSwitch
+          label="Keep wireless debugging enabled"
+          hint="Keeps ADB and Android wireless debugging enabled at boot, even when Lock Mode and FreeKiosk are not running. Trusted host authorizations do not expire."
+          value={alwaysOnWirelessDebug}
+          onValueChange={handleAlwaysOnWirelessDebugChange}
+        />
+        {wirelessDebugStatus && alwaysOnWirelessDebug && (
+          <SettingsInfoBox
+            variant={wirelessDebugStatus.adbEnabled && wirelessDebugStatus.wirelessDebugEnabled ? 'success' : 'warning'}
+            title={wirelessDebugStatus.adbEnabled && wirelessDebugStatus.wirelessDebugEnabled
+              ? '✅ Wireless debugging active'
+              : '⚠️ Wireless debugging needs provisioning'}
+          >
+            <Text style={styles.infoText}>
+              {wirelessDebugStatus.legacyPort5555Active
+                ? 'Legacy ADB is currently listening on TCP port 5555.'
+                : 'The trusted Android wireless-debug connection stays enabled. A fixed legacy port 5555 is controlled by Android adbd and, on stock devices, must be initialized with adb tcpip 5555 after a reboot.'}
+              {!wirelessDebugStatus.writeSecureSettings &&
+                '\n\nGrant WRITE_SECURE_SETTINGS once during provisioning so FreeKiosk can restore wireless debugging at boot.'}
+            </Text>
+          </SettingsInfoBox>
+        )}
+      </SettingsSection>
+      )}
 
       {/* Android System Settings */}
       <SettingsSection title="Android System Settings" icon="android">

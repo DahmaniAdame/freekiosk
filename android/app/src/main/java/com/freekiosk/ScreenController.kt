@@ -34,7 +34,8 @@ object ScreenController {
                 val activity = reactContext.currentActivity
                 if (activity != null) {
                     val prefs = reactContext.getSharedPreferences("FreeKioskSettings", Context.MODE_PRIVATE)
-                    val keepScreenOn = prefs.getBoolean("keep_screen_on", true)
+                    val keepScreenOn = prefs.getBoolean("keep_screen_on", true) ||
+                        KioskAlwaysOnPolicy.isKioskEnabled(reactContext)
                     if (keepScreenOn) {
                         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }

@@ -23,6 +23,17 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
     @ReactMethod
     fun launchExternalApp(packageName: String, promise: Promise) {
         try {
+            // PIN/Settings own the foreground until the route explicitly returns to
+            // Kiosk. Reject delayed AppState, API, or timer callbacks that were queued
+            // before the administrator entered the protected session.
+            if (KioskForegroundGuard.isAdminSessionActive()) {
+                promise.reject(
+                    "ADMIN_SESSION_ACTIVE",
+                    "External app launch is suspended while kiosk administration is open"
+                )
+                return
+            }
+
             val pm = reactApplicationContext.packageManager
             val launchIntent = pm.getLaunchIntentForPackage(packageName)
 
@@ -31,16 +42,31 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
                 val currentActivity = reactApplicationContext.currentActivity
-                var deviceOwnerLockTaskReady = true
+                val kioskProtectionRequired =
+                    KioskForegroundGuard.isProtectionActive(reactApplicationContext)
+                var deviceOwnerLockTaskReady = !kioskProtectionRequired
 
-                // Authorize the exact app selected from the kiosk grid before Android
-                // emits its first window event. AsyncStorage can lag one frame behind a
-                // just-saved grid change, so the accessibility guard must not use that
-                // stale snapshot to pop the selected app immediately.
-                KioskForegroundGuard.authorizeKioskLaunch(
-                    reactApplicationContext,
-                    packageName
-                )
+                if (kioskProtectionRequired &&
+                    packageName !in KioskForegroundGuard.getUserFacingPackages(
+                        reactApplicationContext
+                    )) {
+                    promise.reject(
+                        "APP_NOT_ALLOWED",
+                        "The requested app is not on the configured child-facing kiosk allowlist"
+                    )
+                    return
+                }
+
+                if (kioskProtectionRequired &&
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M &&
+                    !android.provider.Settings.canDrawOverlays(reactApplicationContext)) {
+                    promise.reject(
+                        "OVERLAY_PERMISSION_REQUIRED",
+                        "The kiosk return control requires Android overlay permission"
+                    )
+                    return
+                }
+
                 KioskSystemUiPolicy.enable(reactApplicationContext)
                 WafKioskChromePolicy.enforceForKiosk(reactApplicationContext)
 
@@ -213,11 +239,22 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                     return
                 }
 
-                // Record the selected allowed app before its first window event. This
-                // makes it the recovery target if an OEM briefly exposes another task.
+                // Authorize only after the strict security boundary has been verified.
+                // The selection is process-scoped and cannot survive into a stale reboot loop.
+                KioskForegroundGuard.authorizeKioskLaunch(
+                    reactApplicationContext,
+                    packageName
+                )
+                MainActivity.blockAutoRelaunch = false
                 KioskForegroundGuard.noteAllowedForeground(reactApplicationContext, packageName)
                 BlockingOverlayManager.getInstance(reactApplicationContext)
                     .setForegroundPackage(packageName)
+
+                // Start the return/admin overlay synchronously while FreeKiosk is still in
+                // the foreground. This is deliberately after strict lock verification and
+                // session authorization, but before the child app launch: React Native may
+                // pause its JS thread as soon as the external task takes focus.
+                startSecureExternalAppOverlay(packageName)
 
                 // Use the application context with NEW_TASK. This creates/raises the
                 // external app's own task on vendor Android builds; launching from
@@ -238,6 +275,7 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                 promise.reject("APP_NOT_FOUND", "Application with package name $packageName is not installed")
             }
         } catch (e: Exception) {
+            KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
             DebugLog.errorProduction("AppLauncherModule", "Failed to launch app: ${e.message}")
             promise.reject("ERROR_LAUNCH_APP", "Failed to launch app: ${e.message}")
         }
@@ -455,6 +493,73 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
         reactApplicationContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             .emit(eventName, params)
+    }
+
+    private fun startSecureExternalAppOverlay(packageName: String) {
+        check(
+            KioskForegroundGuard.canRelaunchActiveExternalPackage(
+                reactApplicationContext,
+                packageName
+            )
+        ) { "External-app overlay requested outside strict lock task" }
+
+        val tapCount = readStorageValue("@kiosk_return_tap_count", "5")
+            .toIntOrNull()?.coerceIn(2, 20) ?: 5
+        val tapTimeout = readStorageValue("@kiosk_return_tap_timeout", "1500")
+            .toLongOrNull()?.coerceIn(500L, 5000L) ?: 1500L
+        val returnMode = readStorageValue("@kiosk_return_mode", "button")
+        val buttonPosition =
+            readStorageValue("@kiosk_return_button_position", "bottom-right")
+        val homeButtonEnabled =
+            readStorageValue("@kiosk_home_button_enabled", "true") == "true"
+        val homeButtonPosition =
+            readStorageValue("@kiosk_home_button_position", "bottom-left")
+        val autoRelaunch =
+            readStorageValue("@kiosk_auto_relaunch_app", "true") == "true"
+        val notificationsEnabled =
+            readStorageValue("@kiosk_allow_notifications", "false") == "true"
+
+        val serviceIntent = Intent(
+            reactApplicationContext,
+            OverlayService::class.java
+        ).apply {
+            putExtra("REQUIRED_TAPS", tapCount)
+            putExtra("TAP_TIMEOUT", tapTimeout)
+            putExtra("RETURN_MODE", returnMode)
+            putExtra("BUTTON_POSITION", buttonPosition)
+            putExtra("KIOSK_HOME_BUTTON_ENABLED", homeButtonEnabled)
+            putExtra("KIOSK_HOME_BUTTON_POSITION", homeButtonPosition)
+            putExtra("LOCKED_PACKAGE", packageName)
+            putExtra("AUTO_RELAUNCH", autoRelaunch)
+            putExtra("NFC_ENABLED", notificationsEnabled)
+        }
+
+        reactApplicationContext.startService(serviceIntent)
+        DebugLog.d(
+            "AppLauncherModule",
+            "Secure overlay started for $packageName ($returnMode/$buttonPosition)"
+        )
+    }
+
+    private fun readStorageValue(key: String, defaultValue: String): String {
+        var database: android.database.sqlite.SQLiteDatabase? = null
+        return try {
+            database = android.database.sqlite.SQLiteDatabase.openDatabase(
+                reactApplicationContext.getDatabasePath("RKStorage").absolutePath,
+                null,
+                android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+            )
+            database.rawQuery(
+                "SELECT value FROM catalystLocalStorage WHERE key = ?",
+                arrayOf(key)
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) ?: defaultValue else defaultValue
+            }
+        } catch (_: Exception) {
+            defaultValue
+        } finally {
+            database?.close()
+        }
     }
 
     /**

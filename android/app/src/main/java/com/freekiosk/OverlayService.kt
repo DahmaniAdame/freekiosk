@@ -46,7 +46,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private class CloseAppButtonView(context: Context) : View(context) {
+internal class CloseAppButtonView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
     private val facePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#132733")
@@ -70,18 +70,18 @@ private class CloseAppButtonView(context: Context) : View(context) {
         isClickable = true
         isFocusable = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
-        contentDescription = "Close current app and return to kiosk home"
+        contentDescription = "Close all allowed apps and return to kiosk home"
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val centerX = width / 2f
         val centerY = height / 2f
-        val radius = minOf(width, height) / 2f - 6f * density
-        canvas.drawCircle(centerX, centerY, radius, facePaint)
-        canvas.drawCircle(centerX, centerY, radius, borderPaint)
+        val inset = 2f * density
+        canvas.drawRect(inset, inset, width - inset, height - inset, facePaint)
+        canvas.drawRect(inset, inset, width - inset, height - inset, borderPaint)
 
-        val arm = 8.5f * density
+        val arm = 5.5f * density
         canvas.drawLine(centerX - arm, centerY - arm, centerX + arm, centerY + arm, closePaint)
         canvas.drawLine(centerX + arm, centerY - arm, centerX - arm, centerY + arm, closePaint)
     }
@@ -172,10 +172,62 @@ class OverlayService : Service() {
             }
         }
 
+        /**
+         * Called when FreeKiosk resumes underneath an active multi-app child session.
+         * Explicit close/admin paths clear lockedPackage first, so only an unauthorized
+         * system Back/task finish reaches this recovery.
+         */
+        fun recoverActiveChildIfNeeded(): Boolean {
+            val service = instance ?: return false
+            if (service.lockedPackage.isNullOrBlank()) return false
+            Handler(Looper.getMainLooper()).postDelayed({
+                val target = service.lockedPackage
+                if (target != null &&
+                    KioskForegroundGuard.canRelaunchActiveExternalPackage(service, target)) {
+                    service.bringFreeKioskToFront()
+                }
+            }, 250L)
+            return true
+        }
+
+        fun hasActiveChildSession(): Boolean {
+            val service = instance ?: return false
+            return !service.lockedPackage.isNullOrBlank() &&
+                KioskForegroundGuard.isStrictLockTaskActive(service)
+        }
+
+        /**
+         * WAF SystemUI can temporarily eclipse ordinary application overlays. The WAF
+         * accessibility safety layer mirrors the mandatory controls above SystemUI and
+         * forwards their actions to the authenticated overlay service session.
+         */
+        fun closeActiveChildFromSafetyOverlay(): Boolean {
+            val service = instance ?: return false
+            if (service.lockedPackage.isNullOrBlank()) return false
+            Handler(Looper.getMainLooper()).post {
+                if (!service.lockedPackage.isNullOrBlank()) {
+                    service.closeCurrentAppAndReturnHome()
+                }
+            }
+            return true
+        }
+
+        fun recordAdminTapFromSafetyOverlay(): Boolean {
+            val service = instance ?: return false
+            if (service.lockedPackage.isNullOrBlank()) return false
+            Handler(Looper.getMainLooper()).post {
+                if (!service.lockedPackage.isNullOrBlank()) {
+                    service.handleTap()
+                }
+            }
+            return true
+        }
+
     }
 
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
+    private var navigationGestureShieldView: View? = null
     private var kioskHomeButtonView: View? = null
     private var indicatorView: View? = null  // Visual indicator in tap_anywhere mode
     private var returnButton: View? = null  // Changed from Button to View (now a FrameLayout)
@@ -397,6 +449,13 @@ class OverlayService : Service() {
 
         if (intent == null) {
             DebugLog.d("OverlayService", "onStartCommand with null intent (service restarted by system)")
+            // The selected package is deliberately process-scoped. After process death there
+            // is no authenticated child-app session to restore, so an orphaned sticky overlay
+            // must disappear instead of guessing and reopening an old package.
+            if (lockedPackage == null) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
             val hasOverlayPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
             if (hasOverlayPermission && (overlayView == null || closeButtonMissingWhenExpected())) {
                 destroyOverlay()
@@ -406,7 +465,7 @@ class OverlayService : Service() {
                 createStatusBar()
                 startStatusUpdates()
             }
-            if (autoRelaunchEnabled && lockedPackage != null) {
+            if (lockedPackage != null) {
                 startForegroundMonitoring()
             }
             if (lockedPackage != null) {
@@ -449,10 +508,11 @@ class OverlayService : Service() {
             DebugLog.d("OverlayService", "Button position set to: $buttonPosition")
         }
 
-        kioskHomeButtonEnabled = intent.getBooleanExtra("KIOSK_HOME_BUTTON_ENABLED", kioskHomeButtonEnabled)
-        intent.getStringExtra("KIOSK_HOME_BUTTON_POSITION")?.let { position ->
-            kioskHomeButtonPosition = position
-        }
+        // An external child app must always have one deterministic way back to the kiosk
+        // grid. This is a safety boundary, not optional decoration; only its position is
+        // configurable. Older saved configurations may contain false, so do not honor it.
+        kioskHomeButtonEnabled = true
+        kioskHomeButtonPosition = "bottom-right"
         
         // Get locked package and auto-relaunch settings for monitoring
         intent.getStringExtra("LOCKED_PACKAGE")?.let { pkg ->
@@ -469,9 +529,22 @@ class OverlayService : Service() {
             nfcEnabled = enabled
             DebugLog.d("OverlayService", "NFC enabled (monitoring filter): $nfcEnabled")
         }
+
+        // An external-app overlay is valid only after AppLauncherModule authenticated the
+        // selection and verified Device Owner LOCKED state. Older JS call sites used to start
+        // this service first; that allowed its monitor to repeatedly launch the app while the
+        // system bars and Home were unrestricted if lock task failed.
+        lockedPackage?.let { targetPackage ->
+            if (!KioskForegroundGuard.canRelaunchActiveExternalPackage(this, targetPackage)) {
+                failClosedToFreeKiosk("overlay start rejected for $targetPackage")
+                return START_NOT_STICKY
+            }
+        }
         
-        // Start monitoring if auto-relaunch is enabled and we have a locked package
-        if (autoRelaunchEnabled && lockedPackage != null) {
+        // Always monitor an active child session. The Auto Relaunch preference controls
+        // crash recovery, but it must never turn Android Back/Home into an alternate close
+        // path that bypasses the mandatory custom close button.
+        if (lockedPackage != null) {
             startForegroundMonitoring()
         } else {
             stopForegroundMonitoring()
@@ -502,6 +575,10 @@ class OverlayService : Service() {
                 createOverlay()
             }
         }
+        FreeKioskAccessibilityService.setExternalChildSessionActive(
+            !lockedPackage.isNullOrBlank(),
+        )
+        FreeKioskAccessibilityService.refreshWafEdgeShields()
 
         // Créer la status bar si activée ET si on a la permission
         if (hasOverlayPermission && statusBarEnabled && statusBarView == null) {
@@ -515,6 +592,18 @@ class OverlayService : Service() {
 
     private fun createOverlay() {
         DebugLog.d("OverlayService", "createOverlay() called with returnMode='$returnMode', buttonPosition='$buttonPosition', homeButton=$kioskHomeButtonEnabled/$kioskHomeButtonPosition")
+        if (!lockedPackage.isNullOrBlank()) {
+            createNavigationGestureShieldOverlay()
+            // External apps have one visible control only: Close All. The old fixed/tap-
+            // anywhere return overlay could render a second visible button beside it.
+            // Admin access is retained as the configured multi-tap sequence in an invisible
+            // 8 dp target at the extreme bottom-right; WAF mirrors that target above SystemUI.
+            if (kioskHomeButtonEnabled && kioskHomeButtonView == null) {
+                createKioskHomeButtonOverlay()
+            }
+            createExternalAdminCornerOverlay()
+            return
+        }
         if (returnMode == "button") {
             DebugLog.d("OverlayService", "Creating BUTTON mode overlay")
             createButtonModeOverlay()
@@ -524,28 +613,136 @@ class OverlayService : Service() {
         }
         if (kioskHomeButtonEnabled &&
             kioskHomeButtonView == null &&
-            !lockedPackage.isNullOrBlank() &&
-            currentForegroundPackage == lockedPackage) {
+            !lockedPackage.isNullOrBlank()) {
             createKioskHomeButtonOverlay()
+        }
+    }
+
+    private fun createExternalAdminCornerOverlay() {
+        if (overlayView?.isAttachedToWindow == true) return
+
+        val sizePx = (8 * resources.displayMetrics.density).toInt().coerceAtLeast(16)
+        val target = View(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            contentDescription = "FreeKiosk admin access"
+            setOnClickListener { handleTap() }
+        }
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+        }
+
+        try {
+            overlayView = target
+            windowManager?.addView(target, params)
+            DebugLog.d("OverlayService", "Invisible external-app admin corner created")
+        } catch (error: Exception) {
+            overlayView = null
+            DebugLog.errorProduction(
+                "OverlayService",
+                "Failed to create external-app admin corner: ${error.message}",
+            )
         }
     }
 
     private fun closeButtonMissingWhenExpected(): Boolean {
         return kioskHomeButtonEnabled &&
             !lockedPackage.isNullOrBlank() &&
-            currentForegroundPackage == lockedPackage &&
-            kioskHomeButtonView == null
+            ((!SamsungWafDevice.isWaf(this) &&
+                (kioskHomeButtonView == null ||
+                    kioskHomeButtonView?.isAttachedToWindow != true)) ||
+                navigationGestureShieldView == null ||
+                navigationGestureShieldView?.isAttachedToWindow != true)
+    }
+
+    /**
+     * Immersive mode deliberately allows Android's transient navigation bar to be revealed
+     * by an edge swipe. Lock task prevents Home/Recents from escaping, but the Back button
+     * can still finish a whitelisted child Activity. A narrow transparent overlay owns the
+     * initial bottom-edge touch so the system gesture never starts. Both kiosk controls are
+     * separate windows added afterwards and remain fully clickable above this strip.
+     */
+    private fun createNavigationGestureShieldOverlay() {
+        if (navigationGestureShieldView?.isAttachedToWindow == true) return
+
+        val heightPx = (24 * resources.displayMetrics.density).toInt().coerceAtLeast(24)
+        val shield = View(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    try { KioskModule.sendEventFromNative("screensaverActivity", null) } catch (_: Exception) {}
+                    armInactivityTimer()
+                }
+                true
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            heightPx,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+        }
+
+        try {
+            navigationGestureShieldView = shield
+            windowManager?.addView(shield, params)
+            DebugLog.d("OverlayService", "Bottom navigation gesture shield created")
+        } catch (e: Exception) {
+            navigationGestureShieldView = null
+            DebugLog.errorProduction(
+                "OverlayService",
+                "Failed to create bottom navigation gesture shield: ${e.message}",
+            )
+        }
     }
 
     private fun handleForegroundPackageChanged(foregroundPackage: String?) {
         currentForegroundPackage = foregroundPackage
-        when {
-            kioskHomeButtonEnabled &&
-                !lockedPackage.isNullOrBlank() &&
-                foregroundPackage == lockedPackage &&
-                kioskHomeButtonView == null -> createKioskHomeButtonOverlay()
-
-            foregroundPackage == packageName || lockedPackage == null -> removeCloseAppButton()
+        if (!lockedPackage.isNullOrBlank()) {
+            // The close control belongs to the authenticated external-app session, not to
+            // an individual accessibility window event. TYPE_APPLICATION_OVERLAY windows
+            // are themselves reported as com.freekiosk while the child app is still on top;
+            // removing the button for those events made it blink and eventually disappear.
+            // Keep it present until close/admin explicitly clears lockedPackage.
+            if (navigationGestureShieldView?.isAttachedToWindow != true) {
+                createNavigationGestureShieldOverlay()
+            }
+            if (kioskHomeButtonEnabled &&
+                !SamsungWafDevice.isWaf(this) &&
+                kioskHomeButtonView?.isAttachedToWindow != true) {
+                createKioskHomeButtonOverlay()
+            }
+        } else {
+            removeCloseAppButton()
         }
     }
 
@@ -561,14 +758,12 @@ class OverlayService : Service() {
     }
 
     private fun createKioskHomeButtonOverlay() {
-        val density = resources.displayMetrics.density
-        val sizePx = (64 * density).toInt()
-        val marginPx = (10 * density).toInt()
-        val sameCornerOffsetPx = if (returnMode == "button" && buttonPosition == kioskHomeButtonPosition) {
-            (72 * density).toInt()
-        } else {
-            0
+        if (SamsungWafDevice.isWaf(this)) {
+            removeCloseAppButton()
+            return
         }
+        val density = resources.displayMetrics.density
+        val sizePx = (32 * density).toInt()
 
         val button = CloseAppButtonView(this).apply {
             setOnClickListener {
@@ -589,15 +784,15 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = getPositionGravity(kioskHomeButtonPosition)
-            x = marginPx
-            y = marginPx + sameCornerOffsetPx
+            gravity = Gravity.BOTTOM or Gravity.END
+            x = 0
+            y = 0
         }
 
         try {
             kioskHomeButtonView = button
             windowManager?.addView(button, params)
-            DebugLog.d("OverlayService", "Close App button created at $kioskHomeButtonPosition")
+            DebugLog.d("OverlayService", "Single Close All button created at absolute bottom-right")
         } catch (e: Exception) {
             kioskHomeButtonView = null
             DebugLog.errorProduction("OverlayService", "Failed to create Close App button: ${e.message}")
@@ -665,6 +860,9 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = getButtonGravity()
+            if (SamsungWafDevice.isWaf(this@OverlayService)) {
+                y = (40 * density).toInt()
+            }
         }
 
         try {
@@ -1235,7 +1433,16 @@ class OverlayService : Service() {
         try {
             DebugLog.d("OverlayService", "returnToFreeKiosk() called")
 
-            KioskForegroundGuard.clearActiveKioskPackage(this)
+            // Enter an explicit process-scoped admin session before changing tasks.
+            // Disarm every old child-app relaunch source first; keeping lockedPackage
+            // populated allowed the foreground monitor/re-pin loop to reopen the app
+            // after a valid PIN and force Settings back out of the foreground.
+            autoRelaunchEnabled = false
+            lockedPackage = null
+            FreeKioskAccessibilityService.setExternalChildSessionActive(false)
+            stopForegroundMonitoring()
+            stopOverlayRepinLoop()
+            KioskForegroundGuard.beginAdminSession(this)
             
             // IMPORTANT: Bloquer le relaunch automatique AVANT de lancer MainActivity
             MainActivity.blockAutoRelaunch = true
@@ -1267,6 +1474,7 @@ class OverlayService : Service() {
                         intent.putExtra("navigateToPin", true)
                         startActivity(intent)
                         DebugLog.d("OverlayService", "MainActivity started after moveToFront")
+                        stopSelf()
                         return
                     }
                 }
@@ -1306,12 +1514,17 @@ class OverlayService : Service() {
 
     private fun closeCurrentAppAndReturnHome() {
         val targetPackage = lockedPackage?.takeIf { it != packageName }
+        val allowedPackagesToClose =
+            (KioskForegroundGuard.getUserFacingPackages(this) + listOfNotNull(targetPackage))
+            .filter { it.isNotBlank() && it != packageName }
+            .toSet()
 
         try {
             // Disarm every relaunch path before changing tasks; otherwise the monitor
             // can immediately reopen the app that the user just closed.
             autoRelaunchEnabled = false
             lockedPackage = null
+            FreeKioskAccessibilityService.setExternalChildSessionActive(false)
             stopForegroundMonitoring()
             stopOverlayRepinLoop()
             MainActivity.blockAutoRelaunch = true
@@ -1337,12 +1550,15 @@ class OverlayService : Service() {
 
             val intent = Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra("voluntaryReturn", true)
                 putExtra("kioskHomeReturn", true)
             }
+            KioskForegroundGuard.endAdminSession(this)
             startActivity(intent)
-            closeExternalAppProcess(targetPackage)
-            DebugLog.d("OverlayService", "Closed $targetPackage and returned to kiosk home")
+            allowedPackagesToClose.forEach(::closeExternalAppProcess)
+            DebugLog.d(
+                "OverlayService",
+                "Closed all allowed apps $allowedPackagesToClose and returned to kiosk home",
+            )
             stopSelf()
         } catch (e: Exception) {
             DebugLog.errorProduction("OverlayService", "Failed to close app and return home: ${e.message}")
@@ -1463,14 +1679,17 @@ class OverlayService : Service() {
         
         android.util.Log.i("OverlayService", "Starting foreground monitoring for package: $lockedPackage (interval=${FOREGROUND_CHECK_INTERVAL}ms)")
         
-        foregroundMonitorHandler.post(object : Runnable {
+        // Give the freshly launched child Activity time to publish its RESUMED UsageEvent.
+        // An immediate query can still see FreeKiosk's preceding resume and needlessly launch
+        // the child's launcher Activity a second time during startup.
+        foregroundMonitorHandler.postDelayed(object : Runnable {
             override fun run() {
-                if (autoRelaunchEnabled && lockedPackage != null) {
+                if (lockedPackage != null) {
                     checkForegroundApp()
                     foregroundMonitorHandler.postDelayed(this, FOREGROUND_CHECK_INTERVAL)
                 }
             }
-        })
+        }, 1_000L)
     }
 
     /**
@@ -1485,10 +1704,22 @@ class OverlayService : Service() {
      * Check if the locked app is still in foreground, bring FreeKiosk back if not
      */
     private var foregroundNullCount = 0
+    private var lastForegroundEventQueryTime = System.currentTimeMillis() - 60_000L
+    private var observedForegroundActivityPackage: String? = null
     
     private fun checkForegroundApp() {
         try {
+            val targetPackage = lockedPackage ?: return
             val topPackage = getForegroundPackage()
+
+            // Explicit close/admin paths clear the active selection before changing tasks.
+            // A mismatch here is therefore terminal; a momentary lock-task transition while
+            // trusted FreeKiosk resumes is handled below without throwing the session away.
+            if (KioskForegroundGuard.isAdminSessionActive() ||
+                KioskForegroundGuard.getActiveKioskPackage(this) != targetPackage) {
+                failClosedToFreeKiosk("active selection was cleared")
+                return
+            }
             
             if (topPackage == null) {
                 foregroundNullCount++
@@ -1501,7 +1732,34 @@ class OverlayService : Service() {
             foregroundNullCount = 0
             
             // Correct app in foreground - nothing to do
-            if (topPackage == lockedPackage || topPackage == packageName) {
+            if (topPackage == lockedPackage) {
+                return
+            }
+
+            // Android Back can finish a whitelisted child task and reveal FreeKiosk even
+            // in Device Owner lock task. That is not an authorized close: the close overlay
+            // clears lockedPackage before returning home. Restore the selected app so the
+            // system Back button can never replace the mandatory custom close control.
+            if (topPackage == packageName) {
+                if (KioskForegroundGuard.isStrictLockTaskActive(this)) {
+                    android.util.Log.i(
+                        "OverlayService",
+                        "Unexpected return to FreeKiosk while $targetPackage is active - restoring child app"
+                    )
+                    bringFreeKioskToFront()
+                } else {
+                    // MainActivity repairs lock task synchronously on resume. Keep the
+                    // session/button intact and retry instead of failing closed mid-transition.
+                    android.util.Log.i(
+                        "OverlayService",
+                        "Waiting for lock-task repair before restoring $targetPackage"
+                    )
+                }
+                return
+            }
+
+            if (!KioskForegroundGuard.canRelaunchActiveExternalPackage(this, targetPackage)) {
+                failClosedToFreeKiosk("strict lock task was lost outside FreeKiosk")
                 return
             }
             
@@ -1534,8 +1792,12 @@ class OverlayService : Service() {
             }
             
             // Locked app process is dead (crashed/killed) and foreground is not a child activity
-            android.util.Log.i("OverlayService", "Locked app ($lockedPackage) process dead (current: $topPackage) - bringing FreeKiosk back")
-            bringFreeKioskToFront()
+            if (autoRelaunchEnabled) {
+                android.util.Log.i("OverlayService", "Locked app ($lockedPackage) process dead (current: $topPackage) - relaunching")
+                bringFreeKioskToFront()
+            } else {
+                failClosedToFreeKiosk("external app process ended with auto-relaunch disabled")
+            }
         } catch (e: Exception) {
             android.util.Log.e("OverlayService", "Error checking foreground app: ${e.message}")
         }
@@ -1649,28 +1911,33 @@ class OverlayService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
                 val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
                 if (usageStatsManager != null) {
-                    val currentTime = System.currentTimeMillis()
-                    // Query events from last 5 seconds
-                    val stats = usageStatsManager.queryUsageStats(
-                        UsageStatsManager.INTERVAL_BEST,
-                        currentTime - 5000,
-                        currentTime
-                    )
-                    
-                    if (stats != null && stats.isNotEmpty()) {
-                        // Find the most recently used app
-                        val mostRecent = stats.maxByOrNull { it.lastTimeUsed }
-                        return mostRecent?.packageName
+                    val now = System.currentTimeMillis()
+                    val events = usageStatsManager.queryEvents(lastForegroundEventQueryTime, now)
+                    val event = android.app.usage.UsageEvents.Event()
+                    while (events.hasNextEvent()) {
+                        events.getNextEvent(event)
+                        val resumed = event.eventType ==
+                            android.app.usage.UsageEvents.Event.MOVE_TO_FOREGROUND ||
+                            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                                event.eventType ==
+                                    android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED)
+                        if (resumed && !event.packageName.isNullOrBlank()) {
+                            observedForegroundActivityPackage = event.packageName
+                        }
                     }
+                    lastForegroundEventQueryTime = now - 250L
+                    observedForegroundActivityPackage?.let { return it }
                 }
-            } else {
-                // Fallback for older Android versions (< 5.1)
-                @Suppress("DEPRECATION")
-                val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                @Suppress("DEPRECATION")
-                val runningTasks = am.getRunningTasks(1)
-                return runningTasks.firstOrNull()?.topActivity?.packageName
             }
+
+            // Restricted getRunningTasks() often returns FreeKiosk's own background task on
+            // modern Android. Use it only when Usage Events is unavailable.
+            @Suppress("DEPRECATION")
+            return (getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+                ?.getRunningTasks(1)
+                ?.firstOrNull()
+                ?.topActivity
+                ?.packageName
         } catch (e: Exception) {
             DebugLog.d("OverlayService", "Error getting foreground package: ${e.message}")
         }
@@ -1686,9 +1953,11 @@ class OverlayService : Service() {
      * the external app directly from the native layer, avoiding the JS round-trip.
      */
     private fun bringFreeKioskToFront() {
-        // If we have a locked external app, relaunch it directly
+        // Relaunch only the authenticated active package and only while strict Device Owner
+        // lock task is already active. Any uncertainty fails closed to FreeKiosk home.
         val targetPackage = lockedPackage
-        if (targetPackage != null) {
+        if (targetPackage != null &&
+            KioskForegroundGuard.canRelaunchActiveExternalPackage(this, targetPackage)) {
             try {
                 android.util.Log.i("OverlayService", "Relaunching external app directly: $targetPackage")
                 val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
@@ -1705,24 +1974,42 @@ class OverlayService : Service() {
             }
         }
 
-        // Fallback: bring FreeKiosk to front (webview/media mode, or if external app can't be launched)
+        failClosedToFreeKiosk("external app recovery was not authorized")
+    }
+
+    private fun failClosedToFreeKiosk(reason: String) {
+        val abandonedPackage = lockedPackage
+        autoRelaunchEnabled = false
+        lockedPackage = null
+        stopForegroundMonitoring()
+        stopOverlayRepinLoop()
+        KioskForegroundGuard.clearActiveKioskPackage(this)
+        removeCloseAppButton()
+
         try {
-            android.util.Log.i("OverlayService", "Bringing FreeKiosk to foreground for auto-relaunch")
+            android.util.Log.w(
+                "OverlayService",
+                "Failing closed to FreeKiosk ($reason, abandoned=$abandonedPackage)"
+            )
             val intent = Intent(this, MainActivity::class.java)
             intent.addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
                 Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             )
+            intent.putExtra("kioskSecurityRecovery", true)
             startActivity(intent)
-            DebugLog.d("OverlayService", "FreeKiosk brought to front")
         } catch (e: Exception) {
             DebugLog.errorProduction("OverlayService", "Failed to bring FreeKiosk to front: ${e.message}")
+        } finally {
+            stopSelf()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        FreeKioskAccessibilityService.setExternalChildSessionActive(false)
         instance = null
         try {
             // #190 — Stop the native inactivity countdown so it can't fire after teardown
@@ -1831,6 +2118,19 @@ class OverlayService : Service() {
                 }
             }
             kioskHomeButtonView = null
+
+            navigationGestureShieldView?.let {
+                try {
+                    windowManager?.removeView(it)
+                    DebugLog.d("OverlayService", "Bottom navigation gesture shield removed")
+                } catch (e: Exception) {
+                    DebugLog.d(
+                        "OverlayService",
+                        "Bottom navigation gesture shield already detached: ${e.message}",
+                    )
+                }
+            }
+            navigationGestureShieldView = null
             
             // Supprimer l'indicateur visuel (mode tap_anywhere seulement)
             indicatorView?.let { 

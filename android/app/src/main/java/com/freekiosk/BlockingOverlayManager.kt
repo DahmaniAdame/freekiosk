@@ -38,7 +38,7 @@ class BlockingOverlayManager(private val context: Context) {
     private var isEnabled = false
     private var currentForegroundPackage: String? = null
     private val isSamsungWaf by lazy {
-        context.packageManager.resolveContentProvider("com.xbh.navisetting.controller", 0) != null
+        SamsungWafDevice.isWaf(context)
     }
     
     /**

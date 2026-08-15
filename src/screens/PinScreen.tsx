@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, TouchableOpacity, Text, NativeModules, BackHandler } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, StyleSheet, TouchableOpacity, Text, BackHandler } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import PinInput from '../components/PinInput';
 import { StorageService } from '../utils/storage';
 import { migrateOldPin, hasSecurePin } from '../utils/secureStorage';
@@ -7,6 +8,7 @@ import AppLauncherModule from '../utils/AppLauncherModule';
 import { grantSettingsAccess } from '../utils/authState';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
+import KioskModule from '../utils/KioskModule';
 
 type PinScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Pin'>;
 
@@ -24,6 +26,15 @@ const PinScreen: React.FC<PinScreenProps> = ({ navigation }) => {
     migrateFromOldSystem();
     loadDisplayMode();
   }, []);
+
+  // PIN is still part of the child-facing kiosk boundary. Keep both WAF side menus and the
+  // bottom taskbar hidden here; only a successful PIN entry may restore them in Settings.
+  useFocusEffect(
+    useCallback(() => {
+      KioskModule.setAdminSessionActive(true).catch(() => {});
+      KioskModule.setKioskChromeActive(true).catch(() => {});
+    }, []),
+  );
 
   // Block Android back gesture/button on PIN screen to prevent bypassing PIN (#93)
   useEffect(() => {
@@ -75,34 +86,14 @@ const PinScreen: React.FC<PinScreenProps> = ({ navigation }) => {
   };
 
   const handleBack = async (): Promise<void> => {
+    // This explicit action ends the protected admin attempt. Delayed/timer-based
+    // launches remain rejected while PIN or Settings owns the foreground.
+    await KioskModule.setAdminSessionActive(false).catch(() => {});
     // If in external app mode, relaunch the external app with overlay service
     if (displayMode === 'external_app' && externalAppPackage) {
       try {
-        // Load return settings
-        const returnTapCount = await StorageService.getReturnTapCount();
-        const returnTapTimeout = await StorageService.getReturnTapTimeout();
-        const returnMode = await StorageService.getReturnMode();
-        const returnButtonPosition = await StorageService.getReturnButtonPosition();
-        const kioskHomeButtonEnabled = await StorageService.getKioskHomeButtonEnabled();
-        const kioskHomeButtonPosition = await StorageService.getKioskHomeButtonPosition();
-        const autoRelaunch = await StorageService.getAutoRelaunchApp();
-        
-        // Start OverlayService BEFORE launching the external app
-        const { OverlayServiceModule } = NativeModules;
-        const nfcEnabled = await StorageService.getAllowNotifications();
-        await OverlayServiceModule.startOverlayService(
-          returnTapCount, 
-          returnTapTimeout, 
-          returnMode, 
-          returnButtonPosition,
-          externalAppPackage,
-          autoRelaunch,
-          nfcEnabled,
-          kioskHomeButtonEnabled,
-          kioskHomeButtonPosition
-        );
-        console.log('[PinScreen] OverlayService started with auto-relaunch monitoring');
-        
+        // Native launch verifies strict lock task and starts the return/admin overlay
+        // atomically before the child app receives focus.
         await AppLauncherModule.launchExternalApp(externalAppPackage);
       } catch (error) {
         console.error('[PinScreen] Failed to relaunch external app:', error);

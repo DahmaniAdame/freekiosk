@@ -98,19 +98,22 @@ class BootReceiver : BroadcastReceiver() {
 
             DebugLog.d("BootReceiver", "Boot detected: ${intent.action}")
 
+            // This policy is deliberately independent of Lock Mode / auto-launch. Admin access
+            // must remain available even while the kiosk UI is stopped or before CE unlock.
+            WirelessDebugPolicy.reapply(context)
+
             // ── LOCKED_BOOT_COMPLETED: CE (user-encrypted) storage is NOT yet available ──
             // Any read from RKStorage (SQLite) will fail and return its safe default (false).
             // We instead read the DE SharedPreferences flag that was saved on the previous
             // BOOT_COMPLETED and is still readable because DE storage is always unlocked.
             if (intent.action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
-                // #199 — When screen-lock compatibility is opt-in ON *and* a secure lock screen is
-                // actually set, do NOT fast-boot-lock: let the secure keyguard own the boot so the
-                // user can enter their password (CE then unlocks) and FreeKiosk starts cleanly at
-                // BOOT_COMPLETED. Without this, the kiosk lock-task fights the secure keyguard here
-                // and the device can dead-loop. Gated on both conditions → zero change when the
-                // setting is off or no screen-lock is configured.
-                val compatActive = readScreenLockCompatFlag(context) && isDeviceSecure(context)
-                if (readDeBootFlag(context) && !compatActive) {
+                // Credential-encrypted app data cannot become available until Android's secure
+                // keyguard has accepted the device PIN. Never place BootLockActivity over that
+                // keyguard: doing so makes the PIN unreachable and leaves the display stuck on
+                // the kiosk opening screen. The saved compatibility preference still controls
+                // keyguard behavior after boot, but secure direct boot must always defer.
+                val deviceSecure = isDeviceSecure(context)
+                if (readDeBootFlag(context) && !deviceSecure) {
                     DebugLog.d("BootReceiver", "LOCKED_BOOT: DE flag=true — launching BootLockActivity immediately")
                     try {
                         val lockIntent = Intent(context, BootLockActivity::class.java)
@@ -119,8 +122,8 @@ class BootReceiver : BroadcastReceiver() {
                     } catch (e: Exception) {
                         DebugLog.errorProduction("BootReceiver", "BootLockActivity failed at LOCKED_BOOT: ${e.message}")
                     }
-                } else if (compatActive) {
-                    DebugLog.d("BootReceiver", "LOCKED_BOOT: screen-lock compatibility active + device secure — deferring to the keyguard; FreeKiosk will start at BOOT_COMPLETED")
+                } else if (deviceSecure) {
+                    DebugLog.d("BootReceiver", "LOCKED_BOOT: secure keyguard active — deferring until the device PIN unlocks credential storage")
                 } else {
                     DebugLog.d("BootReceiver", "LOCKED_BOOT: DE flag=false — skipping BootLockActivity")
                 }

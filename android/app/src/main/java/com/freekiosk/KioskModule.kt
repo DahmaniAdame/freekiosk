@@ -87,6 +87,43 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
         }
     }
 
+    // Kiosk chrome and the native tap detector deliberately have separate route state. PIN is
+    // still child-facing (both WAF surfaces hidden) but must never count the kiosk escape taps;
+    // authenticated Settings is the only in-app route that restores the OEM chrome.
+    @ReactMethod
+    fun setKioskChromeActive(active: Boolean, promise: Promise) {
+        try {
+            val activity = reactApplicationContext.currentActivity
+            if (activity is MainActivity) {
+                activity.setKioskChromeActive(active)
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun setAdminSessionActive(active: Boolean, promise: Promise) {
+        try {
+            if (active) {
+                KioskForegroundGuard.beginAdminSession(reactApplicationContext)
+                MainActivity.blockAutoRelaunch = true
+            } else {
+                KioskForegroundGuard.endAdminSession(reactApplicationContext)
+                MainActivity.blockAutoRelaunch = false
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun isAdminSessionActive(promise: Promise) {
+        promise.resolve(KioskForegroundGuard.isAdminSessionActive())
+    }
+
     // #135 — Dismiss the soft keyboard at the window level. React Native's
     // Keyboard.dismiss() only affects RN TextInput components, so a keyboard
     // raised by an <input> inside the WebView stays up when the screensaver
@@ -188,6 +225,37 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", "Failed to set screen-lock compat mode: ${e.message}")
+        }
+    }
+
+    @ReactMethod
+    fun setAlwaysOnWirelessDebug(enabled: Boolean, promise: Promise) {
+        try {
+            val status = WirelessDebugPolicy.setEnabled(reactApplicationContext, enabled)
+            promise.resolve(wirelessDebugStatusMap(status))
+        } catch (e: Exception) {
+            promise.reject("WIRELESS_DEBUG_ERROR", "Failed to update wireless debugging: ${e.message}")
+        }
+    }
+
+    @ReactMethod
+    fun getAlwaysOnWirelessDebugStatus(promise: Promise) {
+        try {
+            promise.resolve(wirelessDebugStatusMap(WirelessDebugPolicy.currentStatus(reactApplicationContext)))
+        } catch (e: Exception) {
+            promise.reject("WIRELESS_DEBUG_ERROR", "Failed to read wireless debugging: ${e.message}")
+        }
+    }
+
+    private fun wirelessDebugStatusMap(status: WirelessDebugPolicy.Status): com.facebook.react.bridge.WritableMap {
+        return com.facebook.react.bridge.Arguments.createMap().apply {
+            putBoolean("configured", status.configured)
+            putBoolean("deviceOwner", status.deviceOwner)
+            putBoolean("writeSecureSettings", status.writeSecureSettings)
+            putBoolean("adbEnabled", status.adbEnabled)
+            putBoolean("wirelessDebugEnabled", status.wirelessDebugEnabled)
+            putBoolean("legacyPort5555Active", status.legacyPort5555Active)
+            if (status.error == null) putNull("error") else putString("error", status.error)
         }
     }
 
@@ -370,6 +438,16 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                             ) {
                                 "Android did not enter Device Owner lock-task mode"
                             }
+                            KioskAlwaysOnPolicy.enforce(reactApplicationContext)
+                            val watchdogIntent = Intent(
+                                reactApplicationContext,
+                                KioskWatchdogService::class.java,
+                            )
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                reactApplicationContext.startForegroundService(watchdogIntent)
+                            } else {
+                                reactApplicationContext.startService(watchdogIntent)
+                            }
                             android.util.Log.d("KioskModule", "Full lock task started (Device Owner) with whitelist: $uniqueWhitelist")
                             // Update DE boot flag so the next LOCKED_BOOT_COMPLETED also locks immediately
                             BootReceiver.updateDeBootFlag(reactApplicationContext, true)
@@ -446,6 +524,10 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                             activity.stopLockTask()
                         }
                         KioskForegroundGuard.clearActiveKioskPackage(reactApplicationContext)
+                        KioskAlwaysOnPolicy.release()
+                        reactApplicationContext.stopService(
+                            Intent(reactApplicationContext, KioskWatchdogService::class.java),
+                        )
                         KioskSystemUiPolicy.restore(reactApplicationContext)
                         if (activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
                             promise.reject("ERROR", "Android remained in lock-task mode after cleanup")
@@ -811,7 +893,8 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
                         // Re-enable FLAG_KEEP_SCREEN_ON only if not in system-managed mode
                         // Check SharedPreferences for the keep_screen_on setting
                         val prefs = reactApplicationContext.getSharedPreferences("FreeKioskSettings", Context.MODE_PRIVATE)
-                        val keepScreenOn = prefs.getBoolean("keep_screen_on", true)
+                        val keepScreenOn = prefs.getBoolean("keep_screen_on", true) ||
+                            KioskAlwaysOnPolicy.isKioskEnabled(reactApplicationContext)
                         if (keepScreenOn) {
                             activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                         }
@@ -932,13 +1015,17 @@ class KioskModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
             val prefs = reactApplicationContext.getSharedPreferences("FreeKioskSettings", Context.MODE_PRIVATE)
             prefs.edit().putBoolean("keep_screen_on", enabled).apply()
 
+            val kioskEnabled = KioskAlwaysOnPolicy.isKioskEnabled(reactApplicationContext)
+            val effectiveEnabled = enabled || kioskEnabled
+            if (kioskEnabled) KioskAlwaysOnPolicy.enforce(reactApplicationContext)
+
             val activity = reactApplicationContext.currentActivity
             if (activity != null) {
                 activity.runOnUiThread {
                     try {
-                        if (enabled) {
+                        if (effectiveEnabled) {
                             activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                            android.util.Log.d("KioskModule", "FLAG_KEEP_SCREEN_ON added — screen stays on")
+                            android.util.Log.d("KioskModule", "FLAG_KEEP_SCREEN_ON added — screen stays on (kiosk=$kioskEnabled)")
                         } else {
                             activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                             android.util.Log.d("KioskModule", "FLAG_KEEP_SCREEN_ON cleared — system manages screen timeout")

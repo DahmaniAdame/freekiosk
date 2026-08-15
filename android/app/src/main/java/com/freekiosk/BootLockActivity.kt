@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.UserManager
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -60,6 +61,7 @@ class BootLockActivity : Activity() {
             WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
             WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
         )
+        KioskAlwaysOnPolicy.enforce(this)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
@@ -169,6 +171,17 @@ class BootLockActivity : Activity() {
     private fun launchMainActivity() {
         // Managed apps are never started here: launching an Activity is visible and
         // could surface above the child-facing kiosk before the active app is chosen.
+        // KioskForegroundGuard is stored in credential-encrypted SharedPreferences.
+        // LOCKED_BOOT_COMPLETED runs before those preferences exist, so touching the
+        // guard here used to crash BootLockActivity and expose Android's FallbackHome.
+        // Leave the previous guard value alone until the user is unlocked; the normal
+        // MainActivity path will reconcile it once credential storage is available.
+        val userManager = getSystemService(Context.USER_SERVICE) as UserManager
+        if (!userManager.isUserUnlocked) {
+            mainActivityLaunched = false
+            DebugLog.d(TAG, "Credential storage is locked; deferring MainActivity launch")
+            return
+        }
         KioskForegroundGuard.clearActiveKioskPackage(this)
 
         try {

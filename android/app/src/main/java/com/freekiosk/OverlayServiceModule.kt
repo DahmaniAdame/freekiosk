@@ -22,6 +22,31 @@ class OverlayServiceModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun startOverlayService(tapCount: Int, tapTimeout: Int, returnMode: String, buttonPosition: String, lockedPackage: String?, autoRelaunch: Boolean, nfcEnabled: Boolean, kioskHomeButtonEnabled: Boolean, kioskHomeButtonPosition: String, promise: Promise) {
         try {
+            if (!lockedPackage.isNullOrBlank() &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                !Settings.canDrawOverlays(reactApplicationContext)) {
+                promise.reject(
+                    "OVERLAY_PERMISSION_REQUIRED",
+                    "The kiosk return control cannot be shown without Android overlay permission"
+                )
+                return
+            }
+
+            if (!lockedPackage.isNullOrBlank() &&
+                !KioskForegroundGuard.canRelaunchActiveExternalPackage(
+                    reactApplicationContext,
+                    lockedPackage
+                )) {
+                reactApplicationContext.stopService(
+                    Intent(reactApplicationContext, OverlayService::class.java)
+                )
+                promise.reject(
+                    "LOCK_TASK_NOT_ACTIVE",
+                    "External-app controls require an authenticated app selection inside strict lock task"
+                )
+                return
+            }
+
             // Démarrer le service même sans permission overlay
             // Le service peut toujours fonctionner en arrière-plan (timer test mode, retour auto)
             // L'overlay button ne sera simplement pas visible sans permission

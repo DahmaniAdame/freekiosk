@@ -76,6 +76,7 @@ class KioskWatchdogService : Service() {
 
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
+        KioskAlwaysOnPolicy.enforce(this)
 
         isRunning = true
         handler.removeCallbacks(checkRunnable)
@@ -92,6 +93,7 @@ class KioskWatchdogService : Service() {
     override fun onDestroy() {
         isRunning = false
         handler.removeCallbacks(checkRunnable)
+        KioskAlwaysOnPolicy.release()
         super.onDestroy()
         DebugLog.d(TAG, "Watchdog destroyed")
     }
@@ -104,7 +106,22 @@ class KioskWatchdogService : Service() {
         // Re-check kiosk setting each cycle (user may have turned it off)
         if (!isKioskEnabled()) {
             DebugLog.d(TAG, "Kiosk mode disabled — stopping watchdog")
+            KioskAlwaysOnPolicy.release()
             stopSelf()
+            return
+        }
+
+        // A child app owns the foreground window in External App mode, so MainActivity's
+        // FLAG_KEEP_SCREEN_ON cannot control its timeout. Self-heal the service-owned lock.
+        KioskAlwaysOnPolicy.enforce(this)
+
+        // The saved kiosk flag without Device Owner LOCKED state is an unsafe partial
+        // state: do not monitor/relaunch any child app in it. Recover the trusted
+        // FreeKiosk task, whose foreground checkpoint restores lock task and System UI
+        // restrictions before another app can be selected.
+        if (!KioskForegroundGuard.isStrictLockTaskActive(this)) {
+            KioskForegroundGuard.clearActiveKioskPackage(this)
+            KioskForegroundGuard.recoverAllowedForeground(this, "strict-lock-task-lost")
             return
         }
 

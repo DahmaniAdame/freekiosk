@@ -92,6 +92,8 @@ object KioskExitManager {
             .onFailure { warnings.addWarning("persist disabled state", it) }
         runCatching { BootReceiver.updateDeBootFlag(context, false) }
             .onFailure { warnings.addWarning("clear direct-boot flag", it) }
+        runCatching { KioskAlwaysOnPolicy.release() }
+            .onFailure { warnings.addWarning("release always-on display policy", it) }
 
         listOf(
             Intent(context, KioskWatchdogService::class.java),

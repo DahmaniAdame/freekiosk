@@ -3,15 +3,25 @@ package com.freekiosk
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.view.Gravity
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -45,14 +55,96 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class FreeKioskAccessibilityService : AccessibilityService() {
 
+    private var wafTopEdgeShield: View? = null
+    private var wafBottomEdgeShield: View? = null
+    private var wafLeftEdgeShield: View? = null
+    private var wafRightEdgeShield: View? = null
+    private var wafCloseAppButton: View? = null
+    private var wafAdminTapTarget: View? = null
+    private var wafEdgesMaskSystemBars = false
+    private val wafEdgeHandler = Handler(Looper.getMainLooper())
+    private val wafEdgeReconcile = object : Runnable {
+        override fun run() {
+            updateWafEdgeShields()
+            wafEdgeHandler.postDelayed(this, 500L)
+        }
+    }
+
+    private val isSamsungWaf: Boolean by lazy {
+        SamsungWafDevice.isWaf(this)
+    }
+
     companion object {
         private const val TAG = "FreeKioskA11y"
+
+        @Volatile
+        private var externalChildSessionActive = false
         
         @Volatile
         var instance: FreeKioskAccessibilityService? = null
             private set
         
         fun isRunning(): Boolean = instance != null
+
+        fun refreshWafEdgeShields() {
+            instance?.updateWafEdgeShields()
+        }
+
+        fun setExternalChildSessionActive(active: Boolean) {
+            externalChildSessionActive = active
+            instance?.updateWafEdgeShields()
+        }
+
+        /** Ensure the kiosk safety service is bound without opening Android Settings. */
+        fun ensureEnabledForDeviceOwner(context: Context): Boolean {
+            return try {
+                val policyManager =
+                    context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                if (!policyManager.isDeviceOwnerApp(context.packageName)) return false
+
+                val admin = ComponentName(context, DeviceAdminReceiver::class.java)
+                val permitted = policyManager.getPermittedAccessibilityServices(admin)
+                if (permitted != null && context.packageName !in permitted) {
+                    policyManager.setPermittedAccessibilityServices(
+                        admin,
+                        (permitted + context.packageName).distinct(),
+                    )
+                    Log.i(TAG, "Added FreeKiosk to permitted accessibility services")
+                }
+
+                val expected = ComponentName(
+                    context,
+                    FreeKioskAccessibilityService::class.java,
+                ).flattenToString()
+                val resolver = context.contentResolver
+                val current = Settings.Secure.getString(
+                    resolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                ).orEmpty()
+                val enabled = current.split(':').any { configured ->
+                    ComponentName.unflattenFromString(configured) ==
+                        ComponentName.unflattenFromString(expected)
+                }
+                if (!enabled) {
+                    val updated = if (current.isBlank()) expected else "$current:$expected"
+                    check(Settings.Secure.putString(
+                        resolver,
+                        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                        updated,
+                    )) { "Android rejected enabled_accessibility_services" }
+                }
+                check(Settings.Secure.putInt(
+                    resolver,
+                    Settings.Secure.ACCESSIBILITY_ENABLED,
+                    1,
+                )) { "Android rejected accessibility_enabled" }
+                Log.i(TAG, "Kiosk accessibility safety service enabled in secure settings")
+                true
+            } catch (error: Exception) {
+                Log.e(TAG, "Could not enable kiosk accessibility safety service: ${error.message}")
+                false
+            }
+        }
         
         /**
          * Send a single key press.
@@ -560,6 +652,16 @@ class FreeKioskAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+
+        // Samsung's transient navigation buttons inject Back/Home/Recents as key events.
+        // Route those events through the kiosk guard before the child app receives them.
+        try {
+            serviceInfo = serviceInfo.apply {
+                flags = flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not enable navigation key filtering: ${e.message}")
+        }
         
         // On API 33+, ensure InputMethod editor flag is set for text/key injection
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -574,6 +676,19 @@ class FreeKioskAccessibilityService : AccessibilityService() {
         }
         
         Log.i(TAG, "FreeKiosk Accessibility Service connected (API ${Build.VERSION.SDK_INT})")
+        wafEdgeHandler.removeCallbacks(wafEdgeReconcile)
+        wafEdgeHandler.post(wafEdgeReconcile)
+    }
+
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (KioskForegroundGuard.shouldConsumeSystemNavigation(this) &&
+            (event.keyCode == KeyEvent.KEYCODE_BACK ||
+                event.keyCode == KeyEvent.KEYCODE_HOME ||
+                event.keyCode == KeyEvent.KEYCODE_APP_SWITCH)) {
+            Log.i(TAG, "Consumed kiosk navigation key ${event.keyCode} action=${event.action}")
+            return true
+        }
+        return super.onKeyEvent(event)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -587,16 +702,31 @@ class FreeKioskAccessibilityService : AccessibilityService() {
         // itself no-ops when the package is unchanged, so updateOverlays() only runs on
         // an actual app change.
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        val pkg = event.packageName?.toString()
-        if (pkg.isNullOrBlank()) return
+        updateWafEdgeShields()
+        val eventPackage = event.packageName?.toString()
+        if (eventPackage.isNullOrBlank()) return
+        // Overlay windows are attributed to com.freekiosk while the child Activity remains
+        // the real foreground owner. Publish the Activity owner so the close control cannot
+        // flap every time an overlay window is re-pinned.
+        val pkg = getActualTopPackage() ?: eventPackage
         try {
             BlockingOverlayManager.getInstance(this).setForegroundPackage(pkg)
             OverlayService.updateForegroundPackage(pkg)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update foreground package for blocking overlays: ${e.message}")
         }
+        KioskForegroundGuard.handleAccessibilityWindow(this, event, eventPackage)
+    }
 
-        KioskForegroundGuard.handleAccessibilityWindow(this, event, pkg)
+    @Suppress("DEPRECATION")
+    private fun getActualTopPackage(): String? {
+        return try {
+            val activityManager =
+                getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            activityManager.getRunningTasks(1).firstOrNull()?.topActivity?.packageName
+        } catch (_: Exception) {
+            null
+        }
     }
 
     override fun onInterrupt() {
@@ -604,8 +734,210 @@ class FreeKioskAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        wafEdgeHandler.removeCallbacks(wafEdgeReconcile)
+        removeWafEdgeShields()
         super.onDestroy()
         instance = null
         Log.i(TAG, "FreeKiosk Accessibility Service disconnected")
+    }
+
+    /**
+     * WAF's navigation/status windows sit above TYPE_APPLICATION_OVERLAY, so a normal overlay
+     * cannot own the initial edge touch. Accessibility overlays are intentionally above those
+     * system windows. While an authenticated child app is active, black edge strips consume
+     * the edge touch before WAF SystemUI can begin a transient-bar gesture. The mandatory
+     * close and admin controls are mirrored at the same layer so an app SurfaceView cannot
+     * temporarily eclipse the ordinary application-overlay controls.
+     */
+    private fun updateWafEdgeShields() {
+        // Keep the four physical edges owned by FreeKiosk for the complete saved kiosk
+        // lifecycle, including the grid/PIN and the short interval in which lock task is
+        // being repaired. Requiring LOCKED here left exactly that recovery interval open
+        // to WAF's side swipe -> desktop caption -> minimize escape.
+        val kioskProtectionActive =
+            externalChildSessionActive || KioskForegroundGuard.isProtectionActive(this)
+        if (!isSamsungWaf || !kioskProtectionActive) {
+            removeWafEdgeShields()
+            return
+        }
+
+        val shouldMaskSystemBars = externalChildSessionActive
+        val edgesReady =
+            wafTopEdgeShield?.isAttachedToWindow == true &&
+                wafBottomEdgeShield?.isAttachedToWindow == true &&
+                wafLeftEdgeShield?.isAttachedToWindow == true &&
+                wafRightEdgeShield?.isAttachedToWindow == true &&
+                wafEdgesMaskSystemBars == shouldMaskSystemBars
+        val controlsReady = if (externalChildSessionActive) {
+            wafCloseAppButton?.isAttachedToWindow == true &&
+                wafAdminTapTarget?.isAttachedToWindow == true
+        } else {
+            wafCloseAppButton == null && wafAdminTapTarget == null
+        }
+        if (edgesReady && controlsReady) return
+
+        if (!edgesReady) {
+            removeWafEdgeShields()
+        }
+        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        // Only the initial edge touch must be owned. Forty dp created 144 px video bands.
+        val edgePx = (12 * resources.displayMetrics.density).toInt().coerceAtLeast(32)
+
+        fun addShield(gravity: Int, horizontal: Boolean): View? {
+            val shield = View(this).apply {
+                setBackgroundColor(
+                    if (horizontal && shouldMaskSystemBars) Color.BLACK else Color.TRANSPARENT,
+                )
+                isClickable = true
+                setOnTouchListener { _, _ -> true }
+            }
+            val params = WindowManager.LayoutParams(
+                if (horizontal) WindowManager.LayoutParams.MATCH_PARENT else edgePx,
+                if (horizontal) edgePx else WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                this.gravity = gravity
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    setFitInsetsTypes(0)
+                }
+            }
+            return try {
+                windowManager.addView(shield, params)
+                shield
+            } catch (error: Exception) {
+                Log.e(TAG, "Could not create WAF edge shield: ${error.message}")
+                null
+            }
+        }
+
+        if (!edgesReady) {
+            wafTopEdgeShield = addShield(Gravity.TOP, horizontal = true)
+            wafBottomEdgeShield = addShield(Gravity.BOTTOM, horizontal = true)
+            wafLeftEdgeShield = addShield(Gravity.START, horizontal = false)
+            wafRightEdgeShield = addShield(Gravity.END, horizontal = false)
+            wafEdgesMaskSystemBars = shouldMaskSystemBars
+        }
+
+        if (externalChildSessionActive) {
+            // Rebuild the pair atomically if either control was detached. This also keeps
+            // the ordering deterministic after a WindowManager/OEM recovery: visible close
+            // control first, tiny transparent admin corner second (above it).
+            removeWafExternalControls(windowManager)
+            wafCloseAppButton = addWafCloseButton(windowManager)
+            // Keep the legacy multi-tap admin target reachable at the extreme corner.
+            // It is intentionally added after the visible Close All control so its tiny
+            // 8 dp hit area owns only the final corner pixels; the rest of the 32 dp square
+            // remains a normal one-tap close target.
+            wafAdminTapTarget = addWafAdminTapTarget(windowManager)
+        } else {
+            removeWafExternalControls(windowManager)
+        }
+        Log.i(
+            TAG,
+            "WAF accessibility safety overlays active=" +
+                (wafTopEdgeShield != null &&
+                    wafBottomEdgeShield != null &&
+                    wafLeftEdgeShield != null &&
+                    wafRightEdgeShield != null),
+        )
+    }
+
+    private fun addWafCloseButton(windowManager: WindowManager): View? {
+        val density = resources.displayMetrics.density
+        val sizePx = (32 * density).toInt()
+        val button = CloseAppButtonView(this).apply {
+            setOnClickListener {
+                isEnabled = false
+                if (!OverlayService.closeActiveChildFromSafetyOverlay()) {
+                    isEnabled = true
+                }
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+        }
+        return try {
+            windowManager.addView(button, params)
+            button
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not create WAF close control: ${error.message}")
+            null
+        }
+    }
+
+    private fun addWafAdminTapTarget(windowManager: WindowManager): View? {
+        val density = resources.displayMetrics.density
+        val sizePx = (8 * density).toInt().coerceAtLeast(16)
+        val target = View(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            contentDescription = "FreeKiosk admin access"
+            setOnClickListener { OverlayService.recordAdminTapFromSafetyOverlay() }
+        }
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.END
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+        }
+        return try {
+            windowManager.addView(target, params)
+            target
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not create WAF admin control: ${error.message}")
+            null
+        }
+    }
+
+    private fun removeWafEdgeShields() {
+        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        listOfNotNull(
+            wafTopEdgeShield,
+            wafBottomEdgeShield,
+            wafLeftEdgeShield,
+            wafRightEdgeShield,
+        ).forEach { view ->
+            runCatching { windowManager.removeView(view) }
+        }
+        wafTopEdgeShield = null
+        wafBottomEdgeShield = null
+        wafLeftEdgeShield = null
+        wafRightEdgeShield = null
+        wafEdgesMaskSystemBars = false
+        removeWafExternalControls(windowManager)
+    }
+
+    private fun removeWafExternalControls(windowManager: WindowManager) {
+        listOfNotNull(wafCloseAppButton, wafAdminTapTarget).forEach { view ->
+            runCatching { windowManager.removeView(view) }
+        }
+        wafCloseAppButton = null
+        wafAdminTapTarget = null
     }
 }

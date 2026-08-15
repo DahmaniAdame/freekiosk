@@ -18,10 +18,15 @@ import android.widget.Toast
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.ReactRootView
+import com.facebook.react.uimanager.DisplayMetricsHolder
+import com.facebook.react.uimanager.RootViewUtil
+import com.facebook.react.uimanager.UIManagerHelper
 import java.security.MessageDigest
 import android.database.sqlite.SQLiteDatabase
 import android.content.ContentValues
 import android.view.KeyEvent
+import android.view.ViewGroup
 import android.content.IntentFilter
 import android.os.Build
 import android.view.WindowInsets
@@ -59,6 +64,7 @@ class MainActivity : ReactActivity() {
 
   // External app launch management
   private var isExternalAppMode = false
+  private var isMultiExternalAppMode = false
   private var externalAppPackage: String? = null
   private var isDeviceOwner = false
   private var isVoluntaryReturn = false  // Flag pour éviter double événement
@@ -73,6 +79,7 @@ class MainActivity : ReactActivity() {
   // Debounce handler for hideSystemUI to avoid dismissing the power menu (GlobalActions)
   // on devices where onWindowFocusChanged fires rapidly (e.g. TECNO/HiOS on Android 14)
   private val hideSystemUIHandler = Handler(Looper.getMainLooper())
+  private val reactLayoutRefreshHandler = Handler(Looper.getMainLooper())
   private var lastFocusLostTime = 0L
 
   override fun getMainComponentName(): String = "FreeKiosk"
@@ -94,7 +101,11 @@ class MainActivity : ReactActivity() {
     }
 
     devicePolicyManager = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    // Keep managed-device debugging available even when kiosk/auto-launch are disabled. The
+    // device-encrypted setting defaults ON and can be controlled from the admin Advanced tab.
+    WirelessDebugPolicy.reapply(this)
     adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
+    FreeKioskAccessibilityService.ensureEnabledForDeviceOwner(this)
 
     // Register screen state receiver to track screen on/off events
     registerScreenStateReceiver()
@@ -168,11 +179,22 @@ class MainActivity : ReactActivity() {
   private fun handleNavigationIntent(intent: Intent?) {
     val shouldNavigateToPin = intent?.getBooleanExtra("navigateToPin", false) == true
     val isVoluntary = intent?.getBooleanExtra("voluntaryReturn", false) == true
+    val isSecurityRecovery =
+      intent?.getBooleanExtra("kioskSecurityRecovery", false) == true
     
-    if (shouldNavigateToPin || isVoluntary) {
+    if (shouldNavigateToPin || isVoluntary || isSecurityRecovery) {
       // IMPORTANT: Mettre le flag AVANT tout traitement async
       blockAutoRelaunch = true
-      DebugLog.d("MainActivity", "handleNavigationIntent: set blockAutoRelaunch=true (pin=$shouldNavigateToPin, voluntary=$isVoluntary)")
+      if (shouldNavigateToPin || isVoluntary) {
+        KioskForegroundGuard.beginAdminSession(this)
+      } else {
+        KioskForegroundGuard.clearActiveKioskPackage(this)
+      }
+      DebugLog.d("MainActivity", "handleNavigationIntent: set blockAutoRelaunch=true (pin=$shouldNavigateToPin, voluntary=$isVoluntary, recovery=$isSecurityRecovery)")
+    }
+    if (isSecurityRecovery) {
+      hideSystemUI()
+      ensureStrictKioskLock("watchdog/overlay recovery")
     }
     // NOTE: navigateToPin event is sent directly by OverlayService via KioskModule.
     // No delayed duplicate send needed here - it caused double-navigation issues.
@@ -654,7 +676,25 @@ class MainActivity : ReactActivity() {
   override fun onResume() {
     super.onResume()
 
+    if (isKioskEnabled()) {
+      KioskAlwaysOnPolicy.enforce(this)
+    }
+
+    if (!FreeKioskAccessibilityService.isRunning()) {
+      FreeKioskAccessibilityService.ensureEnabledForDeviceOwner(this)
+    }
+
     readExternalAppConfig()
+
+    // PIN and Settings suspend the selected child-app session. This native gate
+    // survives JS lifecycle races and remains authoritative even if the one-shot
+    // blockAutoRelaunch flag has already been consumed by an AppState listener.
+    if (KioskForegroundGuard.isAdminSessionActive()) {
+      blockAutoRelaunch = true
+      isVoluntaryReturn = true
+      stopOverlayService()
+      DebugLog.d("MainActivity", "Admin session active — external relaunch suspended")
+    }
     
     // Re-register screen state receiver in case it was lost
     if (screenStateReceiver == null) {
@@ -714,14 +754,37 @@ class MainActivity : ReactActivity() {
     // startLockTask on MainActivity (which would pin FreeKiosk). Instead, immediately
     // relaunch the external app from the native layer to minimize the flash.
     if (isExternalAppMode && !isVoluntaryReturn && kioskEnabled) {
+      // In multi-app mode the selected package is process-scoped in OverlayService rather
+      // than the single-app preference. Android Back may finish that child task and resume
+      // this grid; repair lock task, then restore the selected child before JS can treat the
+      // return as a legitimate close. Explicit custom close/admin paths cleared the service
+      // session first, so they continue to the grid normally.
+      if (isMultiExternalAppMode) {
+        ensureStrictKioskLock("multi external app Back recovery")
+        if (OverlayService.recoverActiveChildIfNeeded()) {
+          isVoluntaryReturn = false
+          return
+        }
+      }
+
       // Relaunch the external app directly if possible
       val targetPkg = externalAppPackage
       if (targetPkg != null) {
         DebugLog.d("MainActivity", "External app mode involuntary return — relaunching $targetPkg directly")
         try {
+          ensureStrictKioskLock("single external app recovery")
+          if (!KioskForegroundGuard.isStrictLockTaskActive(this)) {
+            KioskForegroundGuard.clearActiveKioskPackage(this)
+            stopOverlayService()
+            DebugLog.errorProduction(
+              "MainActivity",
+              "Blocked external app recovery because strict lock task is unavailable",
+            )
+          } else {
           val launchIntent = packageManager.getLaunchIntentForPackage(targetPkg)
           if (launchIntent != null) {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            KioskForegroundGuard.authorizeKioskLaunch(this, targetPkg)
             // Restart OverlayService BEFORE launching 24Six so the button is present
             // when the external app comes to the foreground.
             startOverlayServiceFromNative(targetPkg)
@@ -736,7 +799,10 @@ class MainActivity : ReactActivity() {
             isVoluntaryReturn = false
             return
           }
+          }
         } catch (e: Exception) {
+          KioskForegroundGuard.clearActiveKioskPackage(this)
+          stopOverlayService()
           DebugLog.errorProduction("MainActivity", "Failed to relaunch external app: ${e.message}")
         }
       }
@@ -757,27 +823,10 @@ class MainActivity : ReactActivity() {
       // with the printer selection dialog
       if (PrintModule.isPrintActive) {
         DebugLog.d("MainActivity", "Skipping lock task re-entry: print dialog is active")
-      } else if (!isTaskLocked()) {
-        // Check if power button (GlobalActions) is allowed — if so, the brief focus
-        // loss may be from the power menu. Delay the re-lock to avoid dismissing it.
-        val allowPowerButton = getAsyncStorageValue("@kiosk_allow_power_button", "true") == "true"
-        val timeSinceFocusLost = System.currentTimeMillis() - lastFocusLostTime
-        
-        if (allowPowerButton && timeSinceFocusLost < 2000L) {
-          // Power menu was likely just shown — defer re-lock to avoid focus conflict
-          DebugLog.d("MainActivity", "Deferring re-lock: power menu may be active (${timeSinceFocusLost}ms since focus lost)")
-          Handler(Looper.getMainLooper()).postDelayed({
-            if (!isTaskLocked()) {
-              enableKioskRestrictions()
-              startLockTask()
-              DebugLog.d("MainActivity", "Deferred re-lock completed")
-            }
-          }, 2000L)
-        } else {
-          enableKioskRestrictions()
-          startLockTask()
-          DebugLog.d("MainActivity", "Re-started lock task on resume (with kiosk restrictions)")
-        }
+      } else if (!KioskForegroundGuard.isStrictLockTaskActive(this)) {
+        // Child-facing recovery is immediate. Deferring here leaves a real interval in
+        // which Home, Recents, and system bars can accept input after an OEM task failure.
+        ensureStrictKioskLock("activity resumed")
       }
     }
   }
@@ -876,6 +925,12 @@ class MainActivity : ReactActivity() {
       // reliable signal that the activity is now truly foregrounded.
       if (lockTaskPending) {
         tryStartLockTask("onWindowFocusChanged retry")
+      }
+
+      // Treat every foreground focus as a security checkpoint. OEM launchers and transient
+      // system windows must not leave a child-facing route running outside managed lock task.
+      if (isChildFacingKioskRoute()) {
+        ensureStrictKioskLock("window focus gained")
       }
 
       // If a print dialog was active, reset the flag now that focus has returned
@@ -1055,16 +1110,58 @@ class MainActivity : ReactActivity() {
   // Settings would also fire navigateToPin and kick the user out. Defaults false
   // (fail-safe: no false positives if the focus signal never arrives).
   @Volatile var kioskScreenActive = false
-  @Volatile private var kioskRouteStateKnown = false
+  // Kiosk and PIN are both child-facing. Only authenticated Settings is admin-facing.
+  // Keep this separate from kioskScreenActive because the PIN must retain all kiosk chrome
+  // restrictions without enabling the native tap-to-settings detector there.
+  @Volatile private var kioskChromeActive = true
 
   internal fun setKioskScreenActive(active: Boolean) {
     kioskScreenActive = active
-    kioskRouteStateKnown = true
-    runOnUiThread { hideSystemUI() }
+    // Entering Kiosk is always child-facing. Leaving it does not imply admin access: the next
+    // route is normally PIN, which must stay immersive and keep both WAF surfaces hidden.
+    if (active) {
+      KioskForegroundGuard.endAdminSession(this)
+      blockAutoRelaunch = false
+      kioskChromeActive = true
+      runOnUiThread {
+        hideSystemUI()
+        ensureStrictKioskLock("kiosk route focused")
+      }
+    }
+  }
+
+  internal fun setKioskChromeActive(active: Boolean) {
+    // Route changes never authorize access to Android chrome. It is restored only by the
+    // explicit Lock Mode exit path, which first persists @kiosk_enabled=false.
+    kioskChromeActive = active || isKioskEnabled()
+    runOnUiThread {
+      hideSystemUI()
+      ensureStrictKioskLock("kiosk chrome route focused")
+    }
   }
 
   private fun isChildFacingKioskRoute(): Boolean =
-    !kioskRouteStateKnown || kioskScreenActive
+    kioskChromeActive
+
+  private fun ensureStrictKioskLock(reason: String) {
+    if (!isKioskEnabled() || !devicePolicyManager.isDeviceOwnerApp(packageName)) return
+    try {
+      enableKioskRestrictions()
+      if (!KioskForegroundGuard.isStrictLockTaskActive(this)) {
+        startLockTaskIfPossible()
+      }
+      check(KioskForegroundGuard.isStrictLockTaskActive(this)) {
+        "Android did not enter Device Owner lock-task mode"
+      }
+      DebugLog.d("MainActivity", "Strict kiosk boundary verified ($reason)")
+    } catch (error: Exception) {
+      lockTaskPending = true
+      DebugLog.errorProduction(
+        "MainActivity",
+        "Strict kiosk boundary unavailable ($reason): ${error.message}",
+      )
+    }
+  }
 
   private var tapSettingsCount = 0
   private var tapSettingsFirstTapTime = 0L
@@ -1292,12 +1389,23 @@ class MainActivity : ReactActivity() {
   private fun readExternalAppConfig() {
     try {
       val displayMode = getAsyncStorageValue("@kiosk_display_mode", "webview")
+      val externalMode = getAsyncStorageValue("@kiosk_external_app_mode", "single")
       externalAppPackage = getAsyncStorageValue("@kiosk_external_app_package", "")
       if (externalAppPackage.isNullOrEmpty()) externalAppPackage = null
       isExternalAppMode = displayMode == "external_app"
+      isMultiExternalAppMode = isExternalAppMode && externalMode == "multi"
       isDeviceOwner = devicePolicyManager.isDeviceOwnerApp(packageName)
+
+      // Web/media do not own an external child session. In multi-app mode, however, an
+      // unexpected Android Back resumes MainActivity while the selected child session is
+      // still active; clearing it here would turn Back into an unauthorized close and make
+      // the persistent close button disappear. Explicit close/admin paths clear it first,
+      // and process death already clears the volatile selection safely.
+      if (!isExternalAppMode) {
+        KioskForegroundGuard.clearActiveKioskPackage(this)
+      }
       
-      DebugLog.d("MainActivity", "External app config: mode=$displayMode, package=$externalAppPackage, isDeviceOwner=$isDeviceOwner")
+      DebugLog.d("MainActivity", "External app config: mode=$displayMode/$externalMode, package=$externalAppPackage, isDeviceOwner=$isDeviceOwner")
     } catch (e: Exception) {
       DebugLog.errorProduction("MainActivity", "Error reading external app config: ${e.message}")
     }
@@ -1986,6 +2094,7 @@ class MainActivity : ReactActivity() {
   }
 
   override fun onDestroy() {
+    reactLayoutRefreshHandler.removeCallbacksAndMessages(null)
     super.onDestroy()
 
     if (currentInstance === this) {
@@ -2100,10 +2209,17 @@ class MainActivity : ReactActivity() {
     super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
     if (isInMultiWindowMode && isKioskEnabled()) {
       DebugLog.d("MainActivity", "Multi-window detected in kiosk mode — forcing full-screen relaunch")
-      // Re-launch ourselves as a full-screen single task to exit multi-window
-      val relaunch = Intent(this, MainActivity::class.java)
-      relaunch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-      startActivity(relaunch)
+      hideSystemUI()
+      ensureStrictKioskLock("multi-window escape recovery")
+      val relaunch = Intent(this, MainActivity::class.java).apply {
+        addFlags(
+          Intent.FLAG_ACTIVITY_NEW_TASK or
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+            Intent.FLAG_ACTIVITY_NO_ANIMATION
+        )
+      }
+      KioskTaskLauncher.launch(this, relaunch)
     }
   }
 
@@ -2114,16 +2230,18 @@ class MainActivity : ReactActivity() {
    * via exitKioskMode — which calls stopLockTask() before finish() — still work.
    */
   override fun finish() {
-    if (isTaskLocked()) {
-      DebugLog.d("MainActivity", "finish() blocked — lock task active")
+    if (isKioskEnabled() || isTaskLocked()) {
+      DebugLog.d("MainActivity", "finish() blocked — saved kiosk boundary active")
+      ensureStrictKioskLock("finish attempt")
       return
     }
     super.finish()
   }
 
   override fun finishAndRemoveTask() {
-    if (isTaskLocked()) {
-      DebugLog.d("MainActivity", "finishAndRemoveTask() blocked — lock task active")
+    if (isKioskEnabled() || isTaskLocked()) {
+      DebugLog.d("MainActivity", "finishAndRemoveTask() blocked — saved kiosk boundary active")
+      ensureStrictKioskLock("finishAndRemoveTask attempt")
       return
     }
     super.finishAndRemoveTask()
@@ -2137,6 +2255,19 @@ class MainActivity : ReactActivity() {
     
     // Re-hide system UI after rotation (system bars can reappear on config change)
     hideSystemUI()
+
+    // WAF taskbar suppression changes density without changing the physical window size.
+    // ReactRootView normally updates Fabric constraints only when its pixel measure specs
+    // change, so the old dp width can survive a 480<->577 transition. The result is a root
+    // surface wider than the display: centered app icons move right and corner hit targets
+    // become unreachable. Refresh both React Native's metrics and the root constraints after
+    // the OEM configuration has settled. The delayed pass covers WAF's asynchronous relayout.
+    reactLayoutRefreshHandler.removeCallbacksAndMessages(null)
+    refreshReactRootLayoutForCurrentDensity()
+    reactLayoutRefreshHandler.postDelayed(
+      { refreshReactRootLayoutForCurrentDensity() },
+      250L,
+    )
     
     // Notify blocking overlay manager about configuration change
     try {
@@ -2146,5 +2277,42 @@ class MainActivity : ReactActivity() {
     } catch (e: Exception) {
       DebugLog.e("MainActivity", "Error handling configuration change: ${e.message}")
     }
+  }
+
+  private fun refreshReactRootLayoutForCurrentDensity() {
+    val content = findViewById<View>(android.R.id.content) ?: return
+    val rootView = findReactRootView(content) ?: return
+    val reactContext = rootView.currentReactContext ?: return
+
+    runCatching {
+      DisplayMetricsHolder.initDisplayMetrics(reactContext)
+      val uiManager = UIManagerHelper.getUIManager(reactContext, rootView.uiManagerType)
+        ?: return@runCatching
+      val viewportOffset = RootViewUtil.getViewportOffset(rootView)
+      uiManager.updateRootLayoutSpecs(
+        rootView.rootViewTag,
+        rootView.widthMeasureSpec,
+        rootView.heightMeasureSpec,
+        viewportOffset.x,
+        viewportOffset.y,
+      )
+      rootView.requestLayout()
+      rootView.invalidate()
+      DebugLog.d(
+        "MainActivity",
+        "React root constraints refreshed for density=${resources.displayMetrics.densityDpi}",
+      )
+    }.onFailure { error ->
+      DebugLog.e("MainActivity", "Could not refresh React root constraints: ${error.message}")
+    }
+  }
+
+  private fun findReactRootView(view: View): ReactRootView? {
+    if (view is ReactRootView) return view
+    if (view !is ViewGroup) return null
+    for (index in 0 until view.childCount) {
+      findReactRootView(view.getChildAt(index))?.let { return it }
+    }
+    return null
   }
 }

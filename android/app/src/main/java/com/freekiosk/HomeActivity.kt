@@ -27,6 +27,7 @@ class HomeActivity : AppCompatActivity() {
 
         // Lire la configuration depuis AsyncStorage v2 database
         val displayMode = getAsyncStorageValue("@kiosk_display_mode", "webview")
+        val externalAppMode = getAsyncStorageValue("@kiosk_external_app_mode", "single")
         val kioskEnabled = getAsyncStorageValue("@kiosk_enabled", "false") == "true"
         val externalAppPackage = getAsyncStorageValue("@kiosk_external_app_package", "")
         val externalAppActivity = getAsyncStorageValue("@kiosk_external_app_activity", "")
@@ -51,6 +52,7 @@ class HomeActivity : AppCompatActivity() {
         DebugLog.d("HomeActivity", "Tap settings: count=$tapCount, timeout=${tapTimeout}ms, mode=$returnMode, position=$buttonPosition")
 
         if (displayMode == "external_app" &&
+            externalAppMode == "single" &&
             !externalAppPackage.isNullOrEmpty() &&
             secureExternalLaunchAllowed) {
             KioskSystemUiPolicy.enable(this)
