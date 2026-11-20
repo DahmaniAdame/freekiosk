@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADB configuration accepts `--es new_pin`, which changes the FreeKiosk PIN once the current `pin` authenticates.
 
 ### Fixed
+- Grid apps and MicroAppStation micro-apps that Samsung's auto-disabler put into `DISABLED_UNTIL_USED` are re-enabled on their own. FreeKiosk (Device Owner) silently reinstalls the app from its installed APK, which keeps its data; a tap on such a tile waits for that instead of failing with "App unavailable".
 - Custom grid icons (`iconDataUri`) survive loading: managed-app normalization dropped the field, so the grid kept the package icons.
 - ADB `managed_apps` configuration keeps each entry's `iconDataUri`; its validation rebuilt entries without it.
 

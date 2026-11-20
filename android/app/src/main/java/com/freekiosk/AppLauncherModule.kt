@@ -59,6 +59,8 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
                 reactApplicationContext,
                 packageName,
             )
+            // A tap on an auto-disabled app waits for the reinstall that re-enables it.
+            AutoDisabledAppRepair.awaitRepair(packageName)
             val pm = reactApplicationContext.packageManager
             val microAppIntent = microAppId?.let { MicroAppCatalog.launchIntent(packageName, it) }
             if (microAppId != null) {
