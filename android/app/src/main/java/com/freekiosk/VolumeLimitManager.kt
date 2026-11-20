@@ -27,14 +27,11 @@ object VolumeLimitManager {
             ?: context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val currentVolume = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
-        if (!isKioskActive(context)) return currentVolume
-
-        val systemMaxVolume = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val limitPercent = getConfiguredLimitPercent(context)
-        val maximumAllowedVolume = (systemMaxVolume * limitPercent / 100)
-            .coerceIn(0, systemMaxVolume)
+        val maximumAllowedVolume = maximumAllowedVolume(context, manager)
 
         if (currentVolume > maximumAllowedVolume) {
+            val limitPercent = getConfiguredLimitPercent(context)
+            val systemMaxVolume = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             manager.setStreamVolume(AudioManager.STREAM_MUSIC, maximumAllowedVolume, 0)
             Log.d(
                 TAG,
@@ -45,6 +42,14 @@ object VolumeLimitManager {
         }
 
         return currentVolume
+    }
+
+    /** Raw media-volume ceiling; the stream maximum while lock task is off. */
+    fun maximumAllowedVolume(context: Context, manager: AudioManager): Int {
+        val systemMaxVolume = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (!isKioskActive(context)) return systemMaxVolume
+        return (systemMaxVolume * getConfiguredLimitPercent(context) / 100)
+            .coerceIn(0, systemMaxVolume)
     }
 
     fun isKioskActive(context: Context): Boolean {

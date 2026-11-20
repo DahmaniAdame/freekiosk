@@ -1022,7 +1022,7 @@ class MainActivity : ReactActivity() {
       return super.onKeyDown(keyCode, event)
     }
 
-    // Always-available native kill switch: Volume Up x3, then Volume Down x3.
+    // Optional native kill switch (@kiosk_emergency_volume_exit_enabled): Volume Up x3, then Volume Down x3.
     // It uses the same complete teardown as the Settings and authenticated API exits.
     if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
       val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {

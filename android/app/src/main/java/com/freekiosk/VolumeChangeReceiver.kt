@@ -51,7 +51,9 @@ class VolumeChangeReceiver : BroadcastReceiver() {
                 )
                 val isMusicButtonChange = eventStream == AudioManager.STREAM_MUSIC &&
                     eventVolume >= 0 && previousEventVolume >= 0 &&
-                    eventVolume != previousEventVolume
+                    eventVolume != previousEventVolume &&
+                    // Our own cap correction comes down from above the cap; it is not a press.
+                    previousEventVolume <= VolumeLimitManager.maximumAllowedVolume(context, audioManager)
 
                 // Record the broadcast's own before/after values before applying volume limits.
                 // Samsung emits a corrective VOLUME_CHANGED_ACTION when a limit is enforced;
@@ -67,9 +69,9 @@ class VolumeChangeReceiver : BroadcastReceiver() {
                     false
                 }
 
-                // Do not generate corrective volume broadcasts in the middle of the ordered
-                // emergency gesture. Normal limit enforcement resumes after it times out.
-                val currentVolume = if (emergencyCompleted || EmergencyVolumeSequence.isInProgress()) {
+                // The cap always applies; skipping it mid-gesture let repeated Volume Up presses
+                // run past the cap.
+                val currentVolume = if (emergencyCompleted) {
                     audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                 } else {
                     VolumeLimitManager.enforce(context, audioManager)

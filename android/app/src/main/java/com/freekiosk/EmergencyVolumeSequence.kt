@@ -6,7 +6,11 @@ import android.database.sqlite.SQLiteDatabase
 import android.os.SystemClock
 import android.util.Log
 
-/** Native emergency exit: Volume Up x3 followed by Volume Down x3. */
+/**
+ * Native emergency exit: Volume Up x3 followed by Volume Down x3.
+ * Off unless @kiosk_emergency_volume_exit_enabled is "true": a child mashing the volume
+ * buttons completes it easily and tears the whole kiosk down.
+ */
 object EmergencyVolumeSequence {
     enum class Direction { UP, DOWN }
 
@@ -27,7 +31,7 @@ object EmergencyVolumeSequence {
      */
     @Synchronized
     fun record(context: Context, direction: Direction): Boolean {
-        if (!isKioskActive(context)) {
+        if (!isEnabled(context) || !isKioskActive(context)) {
             reset()
             return false
         }
@@ -80,34 +84,26 @@ object EmergencyVolumeSequence {
         return false
     }
 
-    /** True while a valid sequence is being entered and has not timed out. */
-    @Synchronized
-    fun isInProgress(): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        if ((lastAcceptedAt > 0 && now - lastAcceptedAt > MAX_GAP_MS) ||
-            (startedAt > 0 && now - startedAt > TOTAL_TIMEOUT_MS)) {
-            reset()
-        }
-        return startedAt > 0 && upCount > 0
-    }
+    private fun isEnabled(context: Context): Boolean =
+        readStorage(context, "@kiosk_emergency_volume_exit_enabled") == "true"
 
     private fun isKioskActive(context: Context): Boolean {
         val locked = runCatching {
             val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             manager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
         }.getOrDefault(false)
-        if (locked) return true
-
-        return runCatching {
-            val path = context.getDatabasePath("RKStorage").absolutePath
-            SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY).use { database ->
-                database.rawQuery(
-                    "SELECT value FROM catalystLocalStorage WHERE key = ?",
-                    arrayOf("@kiosk_enabled"),
-                ).use { cursor -> cursor.moveToFirst() && cursor.getString(0) == "true" }
-            }
-        }.getOrDefault(false)
+        return locked || readStorage(context, "@kiosk_enabled") == "true"
     }
+
+    private fun readStorage(context: Context, key: String): String? = runCatching {
+        val path = context.getDatabasePath("RKStorage").absolutePath
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+            database.rawQuery(
+                "SELECT value FROM catalystLocalStorage WHERE key = ?",
+                arrayOf(key),
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        }
+    }.getOrNull()
 
     private fun reset() {
         upCount = 0
