@@ -44,7 +44,10 @@ class AppLauncherModule(reactContext: ReactApplicationContext) : ReactContextBas
             // PIN/Settings own the foreground until the route explicitly returns to
             // Kiosk. Reject delayed AppState, API, or timer callbacks that were queued
             // before the administrator entered the protected session.
-            if (KioskForegroundGuard.isAdminSessionActive()) {
+            // A launch while the Kiosk route is focused (a grid tap) proves the admin session
+            // ended; a missed endAdminSession otherwise left every grid tap doing nothing.
+            if (KioskForegroundGuard.isAdminSessionActive() &&
+                MainActivity.currentInstance?.kioskScreenActive != true) {
                 promise.reject(
                     "ADMIN_SESSION_ACTIVE",
                     "External app launch is suspended while kiosk administration is open"
