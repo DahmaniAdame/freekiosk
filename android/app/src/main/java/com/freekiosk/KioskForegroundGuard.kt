@@ -458,6 +458,10 @@ object KioskForegroundGuard {
             }
             if (applicationInfo.flags and ApplicationInfo.FLAG_INSTALLED == 0) return@forEach
 
+            if (AutoDisabledAppRepair.isAutoDisabled(packageManager, packageName)) {
+                AutoDisabledAppRepair.repairAsync(appContext, applicationInfo)
+            }
+
             try {
                 if (dpm.isApplicationHidden(admin, packageName) &&
                     dpm.setApplicationHidden(admin, packageName, false)) {

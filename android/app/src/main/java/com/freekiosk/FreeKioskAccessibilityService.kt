@@ -695,6 +695,10 @@ class FreeKioskAccessibilityService : AccessibilityService() {
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        if ((event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) &&
+            event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            VolumeChangeReceiver.physicalPressCount++
+        }
         if (KioskForegroundGuard.shouldConsumeSystemNavigation(this) &&
             (event.keyCode == KeyEvent.KEYCODE_BACK ||
                 event.keyCode == KeyEvent.KEYCODE_HOME ||

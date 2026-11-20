@@ -86,6 +86,7 @@ object RemoteSettingsStore {
         Definition("@kiosk_home_button_enabled", "boolean"),
         Definition("@kiosk_home_button_position", "string"),
         Definition("@kiosk_volume_up_5tap_enabled", "boolean"),
+        Definition("@kiosk_emergency_volume_exit_enabled", "boolean"),
         Definition("@kiosk_blocking_overlays_enabled", "boolean"),
         Definition("@kiosk_blocking_overlays_regions", "json"),
         Definition("@motion_camera_position", "string"),
@@ -365,7 +366,7 @@ object RemoteSettingsStore {
             key.contains("overlay_") || key.contains("dashboard_") ||
             key == "@kiosk_display_mode" -> "Apps & Display"
         key.contains("return_") || key.contains("home_button_") ||
-            key.contains("volume_up_5tap") || key.contains("back_button_") ||
+            key.contains("volume_up_5tap") || key.contains("emergency_volume_exit") || key.contains("back_button_") ||
             key.contains("keyboard_mode") || key.contains("pin_mode") ||
             key.contains("pin_max_attempts") -> "Access & Escape"
         key.contains("allow_") || key.contains("block_factory") || key.contains("blocked_apps") ||

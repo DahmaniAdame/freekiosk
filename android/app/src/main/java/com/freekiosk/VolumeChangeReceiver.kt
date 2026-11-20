@@ -24,7 +24,13 @@ class VolumeChangeReceiver : BroadcastReceiver() {
     
     companion object {
         private const val TAG = "VolumeChangeReceiver"
-        
+
+        // Physical volume key presses (DOWN with repeatCount 0), counted by the accessibility
+        // service. Samsung's volume broadcasts for a held key at the cap arrive irregularly,
+        // so timing alone counted one hold as several taps and closed the child app.
+        @Volatile var physicalPressCount = 0L
+        private var lastCountedPress = 0L
+
         // Track volume changes for 5-tap gesture (any direction)
         private var volumeChangeTapCount = 0
         private var volumeChangeLastTapTime = 0L
@@ -51,7 +57,9 @@ class VolumeChangeReceiver : BroadcastReceiver() {
                 )
                 val isMusicButtonChange = eventStream == AudioManager.STREAM_MUSIC &&
                     eventVolume >= 0 && previousEventVolume >= 0 &&
-                    eventVolume != previousEventVolume
+                    eventVolume != previousEventVolume &&
+                    // Our own cap correction comes down from above the cap; it is not a press.
+                    previousEventVolume <= VolumeLimitManager.maximumAllowedVolume(context, audioManager)
 
                 // Record the broadcast's own before/after values before applying volume limits.
                 // Samsung emits a corrective VOLUME_CHANGED_ACTION when a limit is enforced;
@@ -67,9 +75,9 @@ class VolumeChangeReceiver : BroadcastReceiver() {
                     false
                 }
 
-                // Do not generate corrective volume broadcasts in the middle of the ordered
-                // emergency gesture. Normal limit enforcement resumes after it times out.
-                val currentVolume = if (emergencyCompleted || EmergencyVolumeSequence.isInProgress()) {
+                // The cap always applies; skipping it mid-gesture let repeated Volume Up presses
+                // run past the cap.
+                val currentVolume = if (emergencyCompleted) {
                     audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                 } else {
                     VolumeLimitManager.enforce(context, audioManager)
@@ -117,6 +125,13 @@ class VolumeChangeReceiver : BroadcastReceiver() {
         
         // Check if volume actually changed (not just a duplicate event)
         if (lastVolume >= 0 && currentVolume != lastVolume) {
+            // With key events available, a press counts once however many changes it makes.
+            val press = physicalPressCount
+            if (press > 0 && press == lastCountedPress) {
+                Log.d(TAG, "Volume change ignored (same physical press, key held)")
+                lastVolume = currentVolume
+                return
+            }
             val currentTime = System.currentTimeMillis()
             val timeSinceLastTap = currentTime - volumeChangeLastTapTime
             
@@ -137,6 +152,7 @@ class VolumeChangeReceiver : BroadcastReceiver() {
             
             volumeChangeTapCount++
             volumeChangeLastTapTime = currentTime
+            lastCountedPress = press
             
             val direction = if (currentVolume > lastVolume) "UP" else "DOWN"
             Log.d(TAG, "Volume $direction detected! Count: $volumeChangeTapCount/$requiredTaps (was: $lastVolume, now: $currentVolume)")
