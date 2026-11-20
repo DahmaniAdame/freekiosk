@@ -24,7 +24,13 @@ class VolumeChangeReceiver : BroadcastReceiver() {
     
     companion object {
         private const val TAG = "VolumeChangeReceiver"
-        
+
+        // Physical volume key presses (DOWN with repeatCount 0), counted by the accessibility
+        // service. Samsung's volume broadcasts for a held key at the cap arrive irregularly,
+        // so timing alone counted one hold as several taps and closed the child app.
+        @Volatile var physicalPressCount = 0L
+        private var lastCountedPress = 0L
+
         // Track volume changes for 5-tap gesture (any direction)
         private var volumeChangeTapCount = 0
         private var volumeChangeLastTapTime = 0L
@@ -119,6 +125,13 @@ class VolumeChangeReceiver : BroadcastReceiver() {
         
         // Check if volume actually changed (not just a duplicate event)
         if (lastVolume >= 0 && currentVolume != lastVolume) {
+            // With key events available, a press counts once however many changes it makes.
+            val press = physicalPressCount
+            if (press > 0 && press == lastCountedPress) {
+                Log.d(TAG, "Volume change ignored (same physical press, key held)")
+                lastVolume = currentVolume
+                return
+            }
             val currentTime = System.currentTimeMillis()
             val timeSinceLastTap = currentTime - volumeChangeLastTapTime
             
@@ -139,6 +152,7 @@ class VolumeChangeReceiver : BroadcastReceiver() {
             
             volumeChangeTapCount++
             volumeChangeLastTapTime = currentTime
+            lastCountedPress = press
             
             val direction = if (currentVolume > lastVolume) "UP" else "DOWN"
             Log.d(TAG, "Volume $direction detected! Count: $volumeChangeTapCount/$requiredTaps (was: $lastVolume, now: $currentVolume)")
