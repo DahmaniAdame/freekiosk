@@ -315,6 +315,16 @@ class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var navigationGestureShieldView: View? = null
+    // Every window this service added, so destroyOverlay() can remove one even if its
+    // field was overwritten; otherwise it outlives the child app until the process dies.
+    private val addedOverlayWindows = mutableSetOf<View>()
+
+    private fun addOverlayWindow(view: View?, params: WindowManager.LayoutParams) {
+        if (view == null) return
+        addedOverlayWindows.removeAll { it.parent == null }
+        windowManager?.addView(view, params)
+        addedOverlayWindows.add(view)
+    }
     private var kioskHomeButtonView: View? = null
     private var indicatorView: View? = null  // Visual indicator in tap_anywhere mode
     private var returnButton: View? = null  // Changed from Button to View (now a FrameLayout)
@@ -697,7 +707,7 @@ class OverlayService : Service() {
     }
 
     private fun createExternalAdminCornerOverlay() {
-        if (overlayView?.isAttachedToWindow == true) return
+        if (overlayView?.parent != null) return
 
         val normalizedPosition = AdminAccessPosition.normalize(buttonPosition)
         val sizePx = (AdminAccessPosition.externalTargetDp(normalizedPosition) *
@@ -730,7 +740,7 @@ class OverlayService : Service() {
 
         try {
             overlayView = target
-            windowManager?.addView(target, params)
+            addOverlayWindow(target, params)
             DebugLog.d(
                 "OverlayService",
                 "Invisible external-app admin access zone created at $normalizedPosition",
@@ -748,9 +758,9 @@ class OverlayService : Service() {
         return kioskHomeButtonEnabled &&
             !lockedPackage.isNullOrBlank() &&
             ((kioskHomeButtonView == null ||
-                kioskHomeButtonView?.isAttachedToWindow != true) ||
+                kioskHomeButtonView?.parent == null) ||
                 navigationGestureShieldView == null ||
-                navigationGestureShieldView?.isAttachedToWindow != true)
+                navigationGestureShieldView?.parent == null)
     }
 
     private fun reconcileMandatoryChildOverlays(targetPackage: String) {
@@ -785,13 +795,13 @@ class OverlayService : Service() {
                 }
                 overlayView = null
             }
-            if (navigationGestureShieldView?.isAttachedToWindow != true) {
+            if (navigationGestureShieldView?.parent == null) {
                 createNavigationGestureShieldOverlay()
             }
-            if (kioskHomeButtonView?.isAttachedToWindow != true) {
+            if (kioskHomeButtonView?.parent == null) {
                 createKioskHomeButtonOverlay()
             }
-            if (overlayView?.isAttachedToWindow != true) {
+            if (overlayView?.parent == null) {
                 createExternalAdminCornerOverlay()
             }
         }
@@ -808,7 +818,7 @@ class OverlayService : Service() {
      * separate windows added afterwards and remain fully clickable above this strip.
      */
     private fun createNavigationGestureShieldOverlay() {
-        if (navigationGestureShieldView?.isAttachedToWindow == true) return
+        if (navigationGestureShieldView?.parent != null) return
 
         val heightPx = (24 * resources.displayMetrics.density).toInt().coerceAtLeast(24)
         val shield = View(this).apply {
@@ -843,7 +853,7 @@ class OverlayService : Service() {
 
         try {
             navigationGestureShieldView = shield
-            windowManager?.addView(shield, params)
+            addOverlayWindow(shield, params)
             DebugLog.d("OverlayService", "Bottom navigation gesture shield created")
         } catch (e: Exception) {
             navigationGestureShieldView = null
@@ -862,11 +872,11 @@ class OverlayService : Service() {
             // are themselves reported as com.freekiosk while the child app is still on top;
             // removing the button for those events made it blink and eventually disappear.
             // Keep it present until close/admin explicitly clears lockedPackage.
-            if (navigationGestureShieldView?.isAttachedToWindow != true) {
+            if (navigationGestureShieldView?.parent == null) {
                 createNavigationGestureShieldOverlay()
             }
             if (kioskHomeButtonEnabled &&
-                kioskHomeButtonView?.isAttachedToWindow != true) {
+                kioskHomeButtonView?.parent == null) {
                 createKioskHomeButtonOverlay()
             }
         } else {
@@ -920,7 +930,7 @@ class OverlayService : Service() {
 
         try {
             kioskHomeButtonView = button
-            windowManager?.addView(button, params)
+            addOverlayWindow(button, params)
             DebugLog.d("OverlayService", "Single Close All button created at absolute bottom-right")
         } catch (e: Exception) {
             kioskHomeButtonView = null
@@ -996,7 +1006,7 @@ class OverlayService : Service() {
         try {
             // Store the button view as overlayView for cleanup
             overlayView = buttonView
-            windowManager?.addView(buttonView, buttonParams)
+            addOverlayWindow(buttonView, buttonParams)
             DebugLog.d("OverlayService", "Button mode overlay created at $buttonPosition")
         } catch (e: Exception) {
             // #203 — Keep state consistent: a non-null but detached overlayView blocks
@@ -1067,7 +1077,7 @@ class OverlayService : Service() {
         try {
             // Ajouter l'overlay invisible qui détecte les taps
             // En mode tap_anywhere: JAMAIS de bouton visible, peu importe buttonOpacity
-            windowManager?.addView(overlayView, invisibleParams)
+            addOverlayWindow(overlayView, invisibleParams)
             DebugLog.d("OverlayService", "Tap anywhere overlay created (invisible only)")
         } catch (e: Exception) {
             // #203 — Keep state consistent: a non-null but detached overlayView blocks
@@ -1323,7 +1333,7 @@ class OverlayService : Service() {
             params.x = 0
             params.y = 0
 
-            windowManager?.addView(statusBarView, params)
+            addOverlayWindow(statusBarView, params)
             DebugLog.d("OverlayService", "Status bar created successfully at top of screen")
 
             // Première mise à jour immédiate
@@ -2289,6 +2299,11 @@ class OverlayService : Service() {
             
             // Clear returnButton reference
             returnButton = null
+
+            addedOverlayWindows.forEach { view ->
+                if (view.parent != null) runCatching { windowManager?.removeView(view) }
+            }
+            addedOverlayWindows.clear()
 
             DebugLog.d("OverlayService", "All overlay views destroyed")
         } catch (e: Exception) {
