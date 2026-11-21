@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADB configuration accepts `--es new_pin`, which changes the FreeKiosk PIN once the current `pin` authenticates.
 
 ### Fixed
+- Child-app overlay windows no longer pile up. The 3 s overlay re-pin checked `isAttachedToWindow`, which stays false until the first frame after `addView`, so a check right after an add created a second window and orphaned the first. Over four days a tablet collected 267 hidden overlay windows, which starved SystemUI until it froze on a black lock screen. The check now uses the view's parent, set as soon as the window is added, and closing a child app removes every overlay window the service added.
 - Holding a volume button in a child app (e.g. Netflix) no longer returns to the PIN screen. At the volume cap Samsung sends a volume broadcast pair every few hundred ms while the key is held, and the Volume x5 gesture counted each one as a tap. With the accessibility service running, one physical press now counts once however long it is held.
 - Grid apps and MicroAppStation micro-apps that Samsung's auto-disabler put into `DISABLED_UNTIL_USED` are re-enabled on their own. FreeKiosk (Device Owner) silently reinstalls the app from its installed APK, which keeps its data; a tap on such a tile waits for that instead of failing with "App unavailable".
 - Custom grid icons (`iconDataUri`) survive loading: managed-app normalization dropped the field, so the grid kept the package icons.
