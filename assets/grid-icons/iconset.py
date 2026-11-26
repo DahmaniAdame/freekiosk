@@ -111,6 +111,39 @@ ink,acc=rgb('#34405a'),rgb('#4f72a8'); rot=lambda p:[(4-a,4-b) for a,b in p]
 A=[(0,4),(0,1),(2,1)]; B=[(3,4),(1,4),(1,2)]
 for p,c in ((A,ink),(rot(A),ink),(B,acc),(rot(B),acc)): arrow(p,c)
 icons['arrow-me-out']=place(tile(rgb('#faf7f2'),rgb('#c9c4b8')),g)
+# Kipina: flame "spark" (cream outer, amber core), spark dot top right
+g={}; O,I=rgb('#f6d69d'),rgb('#eba846')
+flame=[
+"........O........",
+"........OO.......",
+".......OOO.......",
+".......OOOO......",
+"......OOOOO......",
+"......OOOOOO.....",
+".....OOOOOOO.....",
+"....OOOOOOOOO....",
+"....OOOOIOOOOO...",
+"...OOOOOIOOOOO...",
+"...OOOOIIOOOOOO..",
+"..OOOOOIIIOOOOO..",
+"..OOOOIIIIOOOOOO.",
+".OOOOOIIIIIOOOOO.",
+".OOOOIIIIIIIOOOOO",
+"OOOOOIIIIIIIOOOOO",
+"OOOOIIIIIIIIIOOOO",
+"OOOOIIIIIIIIIOOOO",
+"OOOOIIIIIIIIIOOOO",
+".OOOOIIIIIIIOOOO.",
+".OOOOOIIIIIOOOOO.",
+"..OOOOOOOOOOOOO..",
+"...OOOOOOOOOOO...",
+".....OOOOOOO.....",
+]
+for y,row in enumerate(flame):
+    for x,ch in enumerate(row):
+        if ch!='.': g[(x,y+1)]=O if ch=='O' else I
+rect(g,19,0,19,2,I); rect(g,18,1,20,1,I)              # plus-shaped spark; glyph 21x25
+icons['kipini']=place(tile(rgb('#173a31'),rgb('#0c231d')),g)
 out=sys.argv[1]
 for k,px in icons.items(): save(px,f'{out}/{k}.png')
 # contact sheet for review
