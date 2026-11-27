@@ -144,6 +144,13 @@ for y,row in enumerate(flame):
         if ch!='.': g[(x,y+1)]=O if ch=='O' else I
 rect(g,19,0,19,2,I); rect(g,18,1,20,1,I)              # plus-shaped spark; glyph 21x25
 icons['kipini']=place(tile(rgb('#173a31'),rgb('#0c231d')),g)
+# Echo schedule: calendar page with a three-step visual schedule (25x25)
+g={}; Rd,Pg,Rg,Ln=rgb('#ff6b6b'),rgb('#ffffff'),rgb('#3b3470'),rgb('#c9c4e8')
+rect(g,0,2,24,24,Pg); rect(g,0,2,24,7,Rd)
+for x in (6,18): rect(g,x,0,x,5,Rg)
+for y,c in ((11,rgb('#4cd964')),(16,rgb('#3fa9ff')),(21,rgb('#ffd93b'))):
+    rect(g,2,y-1,4,y+1,c); rect(g,7,y,21,y,Ln)
+icons['echo-schedule']=place(tile(rgb('#6a5fd8'),rgb('#463c9e')),g)
 out=sys.argv[1]
 for k,px in icons.items(): save(px,f'{out}/{k}.png')
 # contact sheet for review
